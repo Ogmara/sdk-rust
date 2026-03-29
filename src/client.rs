@@ -161,6 +161,34 @@ impl OgmaraClient {
         self.get("/api/v1/network/nodes").await
     }
 
+    /// GET /api/v1/users/:address/followers
+    pub async fn get_followers(
+        &self,
+        address: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<FollowerListResponse, SdkError> {
+        self.get(&format!(
+            "/api/v1/users/{}/followers?page={}&limit={}",
+            address, page, limit
+        ))
+        .await
+    }
+
+    /// GET /api/v1/users/:address/following
+    pub async fn get_following(
+        &self,
+        address: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<FollowerListResponse, SdkError> {
+        self.get(&format!(
+            "/api/v1/users/{}/following?page={}&limit={}",
+            address, page, limit
+        ))
+        .await
+    }
+
     // --- Authenticated endpoints ---
 
     /// POST /api/v1/messages — send a signed chat message.
@@ -201,6 +229,69 @@ impl OgmaraClient {
             envelope_bytes,
         )
         .await
+    }
+
+    /// POST /api/v1/users/:address/follow — follow a user.
+    pub async fn follow(&self, target: &str) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+
+        #[derive(serde::Serialize)]
+        struct FollowPayload { target: String }
+
+        let envelope = self.build_envelope(signer, 0x34, &FollowPayload {
+            target: target.to_string(),
+        })?;
+        self.post_authenticated(&format!("/api/v1/users/{}/follow", target), &envelope)
+            .await
+    }
+
+    /// DELETE /api/v1/users/:address/follow — unfollow a user.
+    pub async fn unfollow(&self, target: &str) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+
+        #[derive(serde::Serialize)]
+        struct UnfollowPayload { target: String }
+
+        let envelope = self.build_envelope(signer, 0x35, &UnfollowPayload {
+            target: target.to_string(),
+        })?;
+        // Send as DELETE with body
+        let (auth, address, timestamp) = signer.sign_request("DELETE", &format!("/api/v1/users/{}/follow", target));
+        let url = format!("{}/api/v1/users/{}/follow", self.config.node_url, target);
+        let resp = self
+            .http
+            .delete(&url)
+            .header("x-ogmara-auth", &auth)
+            .header("x-ogmara-address", &address)
+            .header("x-ogmara-timestamp", &timestamp)
+            .header("content-type", "application/octet-stream")
+            .body(envelope)
+            .send()
+            .await?;
+        handle_response(resp).await
+    }
+
+    /// GET /api/v1/feed — personal news feed (posts from followed users).
+    pub async fn get_feed(
+        &self,
+        page: u32,
+        limit: u32,
+    ) -> Result<FeedResponse, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let (auth, address, timestamp) = signer.sign_request("GET", "/api/v1/feed");
+        let url = format!(
+            "{}/api/v1/feed?page={}&limit={}",
+            self.config.node_url, page, limit
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-ogmara-auth", &auth)
+            .header("x-ogmara-address", &address)
+            .header("x-ogmara-timestamp", &timestamp)
+            .send()
+            .await?;
+        handle_response(resp).await
     }
 
     /// Discover nodes from the current home node and store for failover.
