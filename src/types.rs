@@ -159,6 +159,25 @@ pub struct NewsResponse {
     pub page: u32,
 }
 
+// --- Social / Followers ---
+
+/// Follower/following list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowerListResponse {
+    #[serde(alias = "followers", alias = "following")]
+    pub addresses: Vec<String>,
+    pub total: u64,
+    pub page: u32,
+}
+
+/// Personal feed response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedResponse {
+    pub posts: Vec<Envelope>,
+    pub total: u64,
+    pub page: u32,
+}
+
 // --- Node info ---
 
 /// Network node info for failover.
