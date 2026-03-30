@@ -5,6 +5,23 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-30
+
+### Added
+
+- `AnchorStatus` struct — anchor verification level for network nodes
+  (`verified`, `level`, `last_anchor_age_seconds`, `anchoring_since`)
+- `SelfAnchorStatus` struct — self-reported anchor status from `/network/stats`
+- `NodesResponse` typed response for `GET /api/v1/network/nodes`
+- `anchor_status` field on `NodeInfo` (backwards-compatible `Option` with
+  `#[serde(default)]`)
+- `anchor_status` field on `NetworkStats` (backwards-compatible `Option` with
+  `#[serde(default)]`)
+
+### Changed
+
+- `list_nodes()` now returns typed `NodesResponse` instead of raw JSON
+
 ## [0.2.0] - 2026-03-30
 
 ### Changed

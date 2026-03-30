@@ -188,6 +188,8 @@ pub struct NodeInfo {
     pub channels: Option<Vec<u64>>,
     pub user_count: Option<u32>,
     pub last_seen: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_status: Option<AnchorStatus>,
 }
 
 /// Health check response.
@@ -208,6 +210,43 @@ pub struct NetworkStats {
     pub total_users: u64,
     pub uptime_seconds: u64,
     pub protocol_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_status: Option<SelfAnchorStatus>,
+}
+
+/// Anchor verification status for a network node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorStatus {
+    pub verified: bool,
+    /// "active", "verified", or "none"
+    pub level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_anchor_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchoring_since: Option<u64>,
+    #[serde(default)]
+    pub total_anchors: u64,
+}
+
+/// Self anchor status reported by a node in /network/stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfAnchorStatus {
+    pub is_anchorer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_anchor_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_anchor_age_seconds: Option<u64>,
+    pub total_anchors: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchoring_since: Option<u64>,
+}
+
+/// Network nodes list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodesResponse {
+    pub nodes: Vec<NodeInfo>,
+    pub total: u64,
+    pub page: u32,
 }
 
 /// Media upload response.
