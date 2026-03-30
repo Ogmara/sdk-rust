@@ -22,10 +22,13 @@ pub struct ClientConfig {
     pub timeout: Duration,
 }
 
+/// Default production node URL.
+pub const DEFAULT_NODE_URL: &str = "https://node.ogmara.org";
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            node_url: String::new(),
+            node_url: DEFAULT_NODE_URL.to_string(),
             timeout: Duration::from_secs(30),
         }
     }
@@ -143,7 +146,7 @@ impl OgmaraClient {
 
     /// GET /api/v1/users/{address}
     pub async fn get_user(&self, address: &str) -> Result<serde_json::Value, SdkError> {
-        self.get(&format!("/api/v1/users/{}", address)).await
+        self.get(&format!("/api/v1/users/{}", encode_path(address))).await
     }
 
     /// GET /api/v1/news
@@ -170,7 +173,7 @@ impl OgmaraClient {
     ) -> Result<FollowerListResponse, SdkError> {
         self.get(&format!(
             "/api/v1/users/{}/followers?page={}&limit={}",
-            address, page, limit
+            encode_path(address), page, limit
         ))
         .await
     }
@@ -184,9 +187,55 @@ impl OgmaraClient {
     ) -> Result<FollowerListResponse, SdkError> {
         self.get(&format!(
             "/api/v1/users/{}/following?page={}&limit={}",
-            address, page, limit
+            encode_path(address), page, limit
         ))
         .await
+    }
+
+    /// GET /api/v1/news/:msg_id/reactions
+    pub async fn get_news_reactions(
+        &self,
+        msg_id: &str,
+    ) -> Result<NewsReactionsResponse, SdkError> {
+        self.get(&format!("/api/v1/news/{}/reactions", msg_id))
+            .await
+    }
+
+    /// GET /api/v1/news/:msg_id/reposts
+    pub async fn get_news_reposts(
+        &self,
+        msg_id: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<RepostsResponse, SdkError> {
+        self.get(&format!(
+            "/api/v1/news/{}/reposts?page={}&limit={}",
+            msg_id, page, limit
+        ))
+        .await
+    }
+
+    /// GET /api/v1/channels/:channel_id/members
+    pub async fn get_channel_members(
+        &self,
+        channel_id: u64,
+        page: u32,
+        limit: u32,
+    ) -> Result<ChannelMembersResponse, SdkError> {
+        self.get(&format!(
+            "/api/v1/channels/{}/members?page={}&limit={}",
+            channel_id, page, limit
+        ))
+        .await
+    }
+
+    /// GET /api/v1/channels/:channel_id/pins
+    pub async fn get_channel_pins(
+        &self,
+        channel_id: u64,
+    ) -> Result<ChannelPinsResponse, SdkError> {
+        self.get(&format!("/api/v1/channels/{}/pins", channel_id))
+            .await
     }
 
     // --- Authenticated endpoints ---
@@ -266,6 +315,98 @@ impl OgmaraClient {
             .header("x-ogmara-timestamp", &timestamp)
             .header("content-type", "application/octet-stream")
             .body(envelope)
+            .send()
+            .await?;
+        handle_response(resp).await
+    }
+
+    /// POST /api/v1/news/:msg_id/react — react to a news post.
+    pub async fn react_to_news(
+        &self,
+        msg_id: &[u8; 32],
+        emoji: &str,
+        remove: bool,
+    ) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let payload = ReactionPayload {
+            target_id: *msg_id,
+            channel_id: None,
+            emoji: emoji.to_string(),
+            remove,
+        };
+        let envelope = self.build_envelope(signer, MessageType::NEWS_REACTION, &payload)?;
+        self.post_authenticated(
+            &format!("/api/v1/news/{}/react", hex::encode(msg_id)),
+            &envelope,
+        )
+        .await
+    }
+
+    /// POST /api/v1/news/:msg_id/repost — repost a news post.
+    pub async fn repost_news(
+        &self,
+        original_id: &[u8; 32],
+        original_author: &str,
+        comment: Option<&str>,
+    ) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let payload = NewsRepostPayload {
+            original_id: *original_id,
+            original_author: original_author.to_string(),
+            comment: comment.map(|s| s.to_string()),
+        };
+        let envelope = self.build_envelope(signer, MessageType::NEWS_REPOST, &payload)?;
+        self.post_authenticated(
+            &format!("/api/v1/news/{}/repost", hex::encode(original_id)),
+            &envelope,
+        )
+        .await
+    }
+
+    /// GET /api/v1/bookmarks — list bookmarked posts.
+    pub async fn list_bookmarks(
+        &self,
+        page: u32,
+        limit: u32,
+    ) -> Result<BookmarksResponse, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let (auth, address, timestamp) = signer.sign_request("GET", "/api/v1/bookmarks");
+        let url = format!(
+            "{}/api/v1/bookmarks?page={}&limit={}",
+            self.config.node_url, page, limit
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-ogmara-auth", &auth)
+            .header("x-ogmara-address", &address)
+            .header("x-ogmara-timestamp", &timestamp)
+            .send()
+            .await?;
+        handle_response(resp).await
+    }
+
+    /// POST /api/v1/bookmarks/:msg_id — save a post.
+    pub async fn save_bookmark(&self, msg_id: &str) -> Result<serde_json::Value, SdkError> {
+        self.post_authenticated_raw(
+            &format!("/api/v1/bookmarks/{}", msg_id),
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// DELETE /api/v1/bookmarks/:msg_id — unsave a post.
+    pub async fn remove_bookmark(&self, msg_id: &str) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let path = format!("/api/v1/bookmarks/{}", msg_id);
+        let (auth, address, timestamp) = signer.sign_request("DELETE", &path);
+        let url = format!("{}{}", self.config.node_url, path);
+        let resp = self
+            .http
+            .delete(&url)
+            .header("x-ogmara-auth", &auth)
+            .header("x-ogmara-address", &address)
+            .header("x-ogmara-timestamp", &timestamp)
             .send()
             .await?;
         handle_response(resp).await
@@ -394,6 +535,20 @@ impl OgmaraClient {
 
         rmp_serde::to_vec(&envelope).map_err(|e| SdkError::MsgPack(e.to_string()))
     }
+}
+
+/// Percent-encode a path segment (defense-in-depth for user-supplied values).
+/// Klever addresses (bech32) and hex msg_ids are inherently URL-safe,
+/// but this prevents path traversal if unexpected input is passed.
+fn encode_path(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '?' | '#' | '&' | '=' | ' ' | '%' => {
+                format!("%{:02X}", c as u8)
+            }
+            _ => c.to_string(),
+        })
+        .collect()
 }
 
 /// Handle an HTTP response — check status and deserialize.

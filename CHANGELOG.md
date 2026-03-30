@@ -5,6 +5,20 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-30
+
+### Changed
+- Default node URL changed to `https://node.ogmara.org`
+- URL path encoding via `encode_path()` for defense-in-depth
+
+### Added
+- MessageType constants (all 35+ protocol message types)
+- News engagement: react_to_news(), repost_news(), list_bookmarks(), save_bookmark(), remove_bookmark()
+- News queries: get_news_reactions(), get_news_reposts()
+- Channel admin: get_channel_members(), get_channel_pins()
+- Response types: NewsReactionsResponse, RepostsResponse, BookmarksResponse, ChannelMembersResponse, ChannelPinsResponse
+- Payload types: ReactionPayload, NewsRepostPayload, ModeratorPermissions, ChannelMember
+
 ## [0.1.0] - 2026-03-29
 
 ### Added
