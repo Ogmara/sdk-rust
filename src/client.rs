@@ -160,7 +160,7 @@ impl OgmaraClient {
     }
 
     /// GET /api/v1/network/nodes
-    pub async fn list_nodes(&self) -> Result<serde_json::Value, SdkError> {
+    pub async fn list_nodes(&self) -> Result<NodesResponse, SdkError> {
         self.get("/api/v1/network/nodes").await
     }
 
@@ -437,18 +437,16 @@ impl OgmaraClient {
 
     /// Discover nodes from the current home node and store for failover.
     pub async fn discover_nodes(&mut self) -> Result<(), SdkError> {
-        let resp: serde_json::Value = self.get("/api/v1/network/nodes").await?;
-        if let Some(nodes) = resp.get("nodes").and_then(|n| n.as_array()) {
-            self.known_nodes.clear();
-            for node in nodes {
-                if let Some(endpoint) = node.get("api_endpoint").and_then(|e| e.as_str()) {
-                    if !endpoint.is_empty() {
-                        self.known_nodes.push(endpoint.to_string());
-                    }
+        let resp: NodesResponse = self.get("/api/v1/network/nodes").await?;
+        self.known_nodes.clear();
+        for node in &resp.nodes {
+            if let Some(endpoint) = &node.api_endpoint {
+                if !endpoint.is_empty() {
+                    self.known_nodes.push(endpoint.clone());
                 }
             }
-            debug!(count = self.known_nodes.len(), "Discovered nodes for failover");
         }
+        debug!(count = self.known_nodes.len(), "Discovered nodes for failover");
         Ok(())
     }
 
