@@ -232,6 +232,141 @@ pub enum WsEvent {
     Error { code: u16, message: String },
 }
 
+// --- MessageType identifiers (protocol spec 3.2) ---
+
+/// Protocol message type identifiers.
+pub struct MessageType;
+
+impl MessageType {
+    // Chat
+    pub const CHAT_MESSAGE: u8 = 0x01;
+    pub const CHAT_EDIT: u8 = 0x02;
+    pub const CHAT_DELETE: u8 = 0x03;
+    pub const CHAT_REACTION: u8 = 0x04;
+    // Direct Messages
+    pub const DIRECT_MESSAGE: u8 = 0x05;
+    pub const DIRECT_MESSAGE_EDIT: u8 = 0x06;
+    pub const DIRECT_MESSAGE_DELETE: u8 = 0x07;
+    pub const DIRECT_MESSAGE_REACTION: u8 = 0x08;
+    // Channels
+    pub const CHANNEL_CREATE: u8 = 0x10;
+    pub const CHANNEL_UPDATE: u8 = 0x11;
+    pub const CHANNEL_JOIN: u8 = 0x12;
+    pub const CHANNEL_LEAVE: u8 = 0x13;
+    // Channel Administration
+    pub const CHANNEL_ADD_MODERATOR: u8 = 0x14;
+    pub const CHANNEL_REMOVE_MODERATOR: u8 = 0x15;
+    pub const CHANNEL_KICK: u8 = 0x16;
+    pub const CHANNEL_BAN: u8 = 0x17;
+    pub const CHANNEL_UNBAN: u8 = 0x18;
+    pub const CHANNEL_PIN_MESSAGE: u8 = 0x19;
+    pub const CHANNEL_UNPIN_MESSAGE: u8 = 0x1A;
+    pub const CHANNEL_INVITE: u8 = 0x1B;
+    // News
+    pub const NEWS_POST: u8 = 0x20;
+    pub const NEWS_EDIT: u8 = 0x21;
+    pub const NEWS_DELETE: u8 = 0x22;
+    pub const NEWS_COMMENT: u8 = 0x23;
+    pub const NEWS_REACTION: u8 = 0x24;
+    pub const NEWS_REPOST: u8 = 0x25;
+    // Profile & Identity
+    pub const PROFILE_UPDATE: u8 = 0x30;
+    pub const DEVICE_DELEGATION: u8 = 0x31;
+    pub const DEVICE_REVOCATION: u8 = 0x32;
+    pub const SETTINGS_SYNC: u8 = 0x33;
+    pub const FOLLOW: u8 = 0x34;
+    pub const UNFOLLOW: u8 = 0x35;
+    // Moderation
+    pub const REPORT: u8 = 0x40;
+    pub const COUNTER_VOTE: u8 = 0x41;
+    pub const CHANNEL_MUTE: u8 = 0x42;
+    // Account Management
+    pub const DELETION_REQUEST: u8 = 0x50;
+}
+
+// --- News Engagement types ---
+
+/// Reaction data for a specific emoji on a news post.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionInfo {
+    pub count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_reacted: Option<bool>,
+}
+
+/// News reactions response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewsReactionsResponse {
+    pub reactions: std::collections::HashMap<String, ReactionInfo>,
+}
+
+/// Reaction payload for sending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionPayload {
+    pub target_id: [u8; 32],
+    pub channel_id: Option<u64>,
+    pub emoji: String,
+    pub remove: bool,
+}
+
+/// News repost payload for sending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewsRepostPayload {
+    pub original_id: [u8; 32],
+    pub original_author: String,
+    pub comment: Option<String>,
+}
+
+/// Reposts list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepostsResponse {
+    pub reposters: Vec<String>,
+    pub total: u64,
+}
+
+/// Bookmarks list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarksResponse {
+    pub bookmarks: Vec<Envelope>,
+    pub total: u64,
+}
+
+// --- Channel Administration types ---
+
+/// Moderator permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeratorPermissions {
+    pub can_mute: bool,
+    pub can_kick: bool,
+    pub can_ban: bool,
+    pub can_pin: bool,
+    pub can_edit_info: bool,
+    pub can_delete_msgs: bool,
+}
+
+/// Channel member info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelMember {
+    pub address: String,
+    pub role: String,
+    pub joined_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<ModeratorPermissions>,
+}
+
+/// Channel members response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelMembersResponse {
+    pub members: Vec<ChannelMember>,
+    pub total: u64,
+}
+
+/// Channel pins response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPinsResponse {
+    pub pinned_messages: Vec<Envelope>,
+}
+
 // --- Serde helpers ---
 
 mod hex_bytes_32 {
