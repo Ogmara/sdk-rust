@@ -253,7 +253,7 @@ impl OgmaraClient {
             content: content.to_string(),
             content_rating: ContentRating::default(),
             reply_to: None,
-            mentions: Vec::new(),
+            mentions: extract_mentions(content),
             attachments: Vec::new(),
         };
 
@@ -563,4 +563,19 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     }
     let body = resp.json().await?;
     Ok(body)
+}
+
+/// Extract @klv1... addresses from message content for auto-mention detection.
+fn extract_mentions(content: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    for word in content.split_whitespace() {
+        if let Some(addr) = word.strip_prefix('@') {
+            if addr.starts_with("klv1") && addr.len() == 62 && addr[4..].chars().all(|c| c.is_ascii_alphanumeric()) {
+                if !mentions.contains(&addr.to_string()) {
+                    mentions.push(addr.to_string());
+                }
+            }
+        }
+    }
+    mentions
 }
