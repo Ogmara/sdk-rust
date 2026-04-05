@@ -128,17 +128,23 @@ impl OgmaraClient {
     }
 
     /// GET /api/v1/channels/{channel_id}/messages
+    ///
+    /// `after` returns messages newer than the given msg_id (incremental fetch).
+    /// `before` and `after` are mutually exclusive; `after` takes precedence.
     pub async fn get_channel_messages(
         &self,
         channel_id: u64,
         limit: u32,
         before: Option<&str>,
+        after: Option<&str>,
     ) -> Result<MessagesResponse, SdkError> {
         let mut path = format!(
             "/api/v1/channels/{}/messages?limit={}",
             channel_id, limit
         );
-        if let Some(before_id) = before {
+        if let Some(after_id) = after {
+            path.push_str(&format!("&after={}", after_id));
+        } else if let Some(before_id) = before {
             path.push_str(&format!("&before={}", before_id));
         }
         self.get(&path).await
