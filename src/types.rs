@@ -20,17 +20,62 @@ pub struct User {
 
 // --- Channel ---
 
+/// Channel type constants (mirrors `ChannelType` in protocol spec §3.6).
+///
+/// Stored on the channel record as a numeric value. `Public` and `ReadPublic`
+/// are L2-mutable via `ChannelUpdate`; `Private` is set at creation and
+/// cannot be flipped post-creation.
+pub const CHANNEL_TYPE_PUBLIC: u8 = 0;
+pub const CHANNEL_TYPE_READ_PUBLIC: u8 = 1;
+pub const CHANNEL_TYPE_PRIVATE: u8 = 2;
+
 /// A channel in the Ogmara network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub channel_id: u64,
     pub slug: String,
     pub creator: String,
+    /// Runtime channel type (L2-mutable). The L2 node may flip a channel
+    /// between `Public` (0) and `ReadPublic` (1) at runtime via
+    /// `ChannelUpdate`. The on-chain immutable type is the directory-listing
+    /// type only — clients should treat this field as authoritative for
+    /// posting policy. `Private` is 2.
     pub channel_type: u8,
     pub created_at: u64,
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub member_count: Option<u64>,
+    /// When `Some(true)`, the channel renders in threaded mode. L2-mutable
+    /// via `ChannelUpdate`. Older nodes (pre-0.31.0) won't surface this
+    /// field — `None` is treated identically to `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_enabled: Option<bool>,
+}
+
+impl Channel {
+    /// Whether `address` is permitted to post `ChatMessage` / `ChatEdit` /
+    /// `ChatDelete` to this channel under its runtime posting policy.
+    ///
+    /// Posting rules (protocol spec §3.6):
+    /// - `Public` (0): any member with a valid signature can post.
+    /// - `ReadPublic` (1, broadcast): only the creator and moderators can
+    ///   post; members may still react.
+    /// - `Private` (2): same as `Public` for the membership-set; non-members
+    ///   are filtered out at the membership layer upstream.
+    ///
+    /// Pass the moderator-status flag the caller already knows (e.g. from a
+    /// prior `get_channel_members` lookup). When in doubt, pass `false` —
+    /// the function errs on the safe side and returns `false` for ReadPublic
+    /// channels, which prompts the UI to hide the composer.
+    pub fn can_post(&self, address: &str, is_moderator: bool) -> bool {
+        if self.channel_type != CHANNEL_TYPE_READ_PUBLIC {
+            // Public and Private channels: posting is gated elsewhere
+            // (membership, bans, mutes). Read-only policy is permissive.
+            return true;
+        }
+        // ReadPublic: creator + moderators only.
+        self.creator == address || is_moderator
+    }
 }
 
 // --- Message Envelope ---

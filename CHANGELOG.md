@@ -5,6 +5,29 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-05
+
+### Added
+- **Read-only / broadcast channel awareness (paired with `l2-node` v0.31.0).**
+  - New `Channel::threads_enabled: Option<bool>` field reflects the runtime
+    threaded-mode flag. Older nodes (pre-0.31.0) won't surface the field;
+    `None` is treated identically to `Some(false)`.
+  - New `Channel::can_post(&self, address, is_moderator) -> bool` method —
+    returns whether a wallet may post `ChatMessage` / `ChatEdit` /
+    `ChatDelete` under the channel's runtime posting policy. Returns `true`
+    for non-ReadPublic channels and for the creator/moderators of
+    ReadPublic channels.
+  - New constants exported from the crate root:
+    `CHANNEL_TYPE_PUBLIC` (0), `CHANNEL_TYPE_READ_PUBLIC` (1),
+    `CHANNEL_TYPE_PRIVATE` (2).
+
+### Notes
+- The `Channel.channel_type` doc comment now clarifies it reflects the
+  runtime (L2-mutable) value, not the on-chain immutable type.
+- This release does NOT add a `ChannelUpdate` envelope builder. Clients
+  needing to flip channel type or threads_enabled use the JS SDK or call
+  the L2 node API directly. A Rust envelope builder is a future addition.
+
 ## [0.3.2] - 2026-04-05
 
 ### Added
