@@ -155,6 +155,35 @@ impl OgmaraClient {
         self.get(&format!("/api/v1/users/{}", encode_path(address))).await
     }
 
+    /// GET /api/v1/users/search — `@`-mention autocomplete.
+    ///
+    /// Case-insensitive prefix search on `display_name`. When `q` looks
+    /// like a `klv1...` prefix the L2 node also matches addresses, so
+    /// callers can complete `@klv1abc` even if no display name is set.
+    ///
+    /// `limit` is clamped server-side to 1..=50 (default 20). `q` is
+    /// required and capped at 64 chars after trim — empty/whitespace
+    /// returns 400.
+    ///
+    /// No authentication required. Pairs with `l2-node` v0.32.0+; older
+    /// nodes return 404.
+    pub async fn search_users(
+        &self,
+        q: &str,
+        limit: u32,
+    ) -> Result<UserSearchResponse, SdkError> {
+        // Use query-string encoding (stricter than path encoding) so '@', '+',
+        // '&' etc. round-trip correctly. `+` is the silent failure here:
+        // path encoding leaves it alone, but query strings decode it as
+        // space — searching for "a+b" would corrupt to "a b" server-side.
+        self.get(&format!(
+            "/api/v1/users/search?q={}&limit={}",
+            encode_query(q),
+            limit,
+        ))
+        .await
+    }
+
     /// GET /api/v1/news
     pub async fn list_news(
         &self,
@@ -553,6 +582,24 @@ fn encode_path(s: &str) -> String {
             _ => c.to_string(),
         })
         .collect()
+}
+
+/// Percent-encode a query string value. Stricter than `encode_path` because
+/// query strings interpret additional characters specially: `+` decodes to
+/// space, `&` separates pairs, `=` separates key/value, `#` starts the
+/// fragment. Anything outside the unreserved set is percent-encoded.
+///
+/// RFC 3986 unreserved: `ALPHA / DIGIT / "-" / "." / "_" / "~"`.
+fn encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' => out.push(c),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// Handle an HTTP response — check status and deserialize.

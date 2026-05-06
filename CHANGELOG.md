@@ -5,6 +5,23 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-06
+
+### Added
+- **`Client::search_users(q, limit)` method** — wraps
+  `GET /api/v1/users/search` for `@`-mention autocomplete.
+  Case-insensitive prefix search on `display_name`; when `q` starts
+  with `klv1...` the L2 node also matches addresses. Returns
+  `UserSearchResponse { users: Vec<UserSearchHit> }` with `address`,
+  `display_name`, `avatar_cid`, and `verified`. No auth required.
+  Pairs with `l2-node` v0.32.0+; older nodes return 404.
+- **`UserSearchHit` and `UserSearchResponse` types** added to
+  `types.rs` and re-exported via the crate root.
+
+### Notes
+- Server clamps `limit` to 1..=50 (default 20) and rejects empty `q`
+  with 400. Callers should validate locally before calling.
+
 ## [0.4.0] - 2026-05-05
 
 ### Added

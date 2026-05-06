@@ -445,6 +445,25 @@ pub struct ChannelMembersResponse {
     pub total: u64,
 }
 
+/// A single hit from `GET /api/v1/users/search` (mention autocomplete).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSearchHit {
+    /// Resolved klever wallet address (always `klv1...`).
+    pub address: String,
+    /// Display name as the user set it (with original casing); `None` if unset.
+    pub display_name: Option<String>,
+    /// IPFS CID of the user's avatar; `None` if unset.
+    pub avatar_cid: Option<String>,
+    /// `true` when the user is on-chain registered (`registered_at > 0`).
+    pub verified: bool,
+}
+
+/// Response shape for `GET /api/v1/users/search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSearchResponse {
+    pub users: Vec<UserSearchHit>,
+}
+
 /// Channel pins response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPinsResponse {
