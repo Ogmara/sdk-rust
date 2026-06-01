@@ -294,6 +294,125 @@ pub struct NodesResponse {
     pub page: u32,
 }
 
+// --- Presence gossip (spec 13 §10, sdk-rust 0.6.0+, l2-node 0.48.0+) ---
+
+/// Spec 13 §10.8 attestation taxonomy. Describes how a node makes
+/// itself discoverable. Orthogonal to the existing discovery-tier
+/// `source` field — here we only care about what the NODE attests,
+/// not how the CLIENT learned about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Attestation {
+    OnChain,
+    Gossip,
+    Both,
+}
+
+impl Attestation {
+    /// `true` for `OnChain` and `Both` — i.e., the node has an SC
+    /// registration. Used by `compute_trust_score`.
+    pub fn includes_on_chain(self) -> bool {
+        matches!(self, Attestation::OnChain | Attestation::Both)
+    }
+}
+
+/// Spec 03 §4.1 — `GET /api/v1/network/identity`. Lightweight self-
+/// description used by the Reachable probe (spec 13 §10.9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkIdentity {
+    pub peer_id: String,
+    pub network_id: String,
+    pub version: String,
+    pub public_url: Option<String>,
+    pub presence_broadcasting: bool,
+}
+
+/// Spec 13 §10.2 / §10.6 — single presence record as exposed by
+/// `GET /api/v1/network/presence`. The L2 node enriches each row
+/// with `verified_on_chain` / `anchored` / `last_anchor_at` by
+/// cross-referencing the local SC view cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceRecord {
+    pub peer_id: String,
+    pub public_url: Option<String>,
+    pub version: String,
+    pub timestamp: u64,
+    pub ttl_secs: u32,
+    pub first_heard: u64,
+    pub last_heard: u64,
+    pub expires_at: u64,
+    pub verified_on_chain: bool,
+    pub anchored: bool,
+    pub last_anchor_at: Option<u64>,
+}
+
+/// Response shape of `GET /api/v1/network/presence`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceResponse {
+    pub self_peer_id: String,
+    pub broadcasting: bool,
+    pub cache_size: u32,
+    pub cache_cap: u32,
+    pub records: Vec<PresenceRecord>,
+}
+
+/// Spec 5 §1.1 — merged client-side view of a network node.
+///
+/// Built by [`crate::client::OgmaraClient::get_known_nodes`] by
+/// joining the SC-derived `/network/nodes` response with the
+/// off-chain `/network/presence` response by libp2p PeerId.
+///
+/// Apps that want the +10 reachability contribution to `trust_score`
+/// pass a probe-cache map into `get_known_nodes`; the next call
+/// incorporates the timestamp. Without a probe, scores top out at
+/// 90.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownNode {
+    pub peer_id: String,
+    pub url: Option<String>,
+    pub attestation: Attestation,
+    pub anchoring: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable_probe_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_timestamp_ms: Option<u64>,
+    pub trust_score: u8,
+}
+
+/// Spec 5 §1.1 trust-score derivation. Returns `0..=100`. Pure
+/// function so callers can re-score after an external reachability
+/// probe lands without re-fetching the whole list.
+///
+/// Contributions (locked, spec 13 §10.8 / planning doc §4.2):
+///  - +50 if `attestation` includes `on-chain`
+///  - +30 if `anchoring == true` (active or verified anchor in 7d)
+///  - +10 if `attestation == Both` (cross-source consistency)
+///  - +10 if `reachable_probe_at_ms` is within the last 24 hours
+pub fn compute_trust_score(node: &KnownNode) -> u8 {
+    let mut s: u32 = 0;
+    if node.attestation.includes_on_chain() {
+        s += 50;
+    }
+    if node.anchoring {
+        s += 30;
+    }
+    if matches!(node.attestation, Attestation::Both) {
+        s += 10;
+    }
+    if let Some(probe_ms) = node.reachable_probe_at_ms {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if now_ms.saturating_sub(probe_ms) < 86_400_000 {
+            s += 10;
+        }
+    }
+    s.min(100) as u8
+}
+
 /// Media upload response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadResult {
@@ -515,5 +634,76 @@ mod base64_bytes {
         base64::engine::general_purpose::STANDARD
             .decode(&s)
             .map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    fn node(attestation: Attestation, anchoring: bool) -> KnownNode {
+        KnownNode {
+            peer_id: "12D3KooWTest".to_string(),
+            url: Some("https://node.example.org".to_string()),
+            attestation,
+            anchoring,
+            anchor_age_seconds: None,
+            reachable_probe_at_ms: None,
+            presence_timestamp_ms: None,
+            trust_score: 0,
+        }
+    }
+
+    /// Spec 5 §1.1 / spec 13 §10.8: locked trust-score formula.
+    /// Gossip-only with no probe: 0. Anchoring on-chain: 80. Both
+    /// with anchor + recent probe: 100. Locks the contribution
+    /// weights so a future regression on the score is caught.
+    #[test]
+    fn compute_trust_score_table() {
+        // Gossip-only, no probe → 0
+        assert_eq!(compute_trust_score(&node(Attestation::Gossip, false)), 0);
+
+        // On-chain, no anchoring → 50
+        assert_eq!(compute_trust_score(&node(Attestation::OnChain, false)), 50);
+
+        // On-chain + anchoring → 80
+        assert_eq!(compute_trust_score(&node(Attestation::OnChain, true)), 80);
+
+        // Both + anchoring → 90 (cross-source +10 bonus)
+        assert_eq!(compute_trust_score(&node(Attestation::Both, true)), 90);
+
+        // Both + anchoring + fresh probe → 100 (cap)
+        let mut n = node(Attestation::Both, true);
+        n.reachable_probe_at_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
+        assert_eq!(compute_trust_score(&n), 100);
+
+        // Stale probe (older than 24h) does NOT contribute.
+        let mut stale = node(Attestation::Both, true);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        stale.reachable_probe_at_ms = Some(now_ms.saturating_sub(25 * 3600 * 1000));
+        assert_eq!(compute_trust_score(&stale), 90);
+    }
+
+    /// Cap is enforced at 100 even if a future contribution would push higher.
+    #[test]
+    fn trust_score_caps_at_100() {
+        // Score 100 — saturate; we just want to confirm no overflow.
+        let mut n = node(Attestation::Both, true);
+        n.reachable_probe_at_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
+        let score = compute_trust_score(&n);
+        assert!(score <= 100, "trust_score must not exceed 100, got {score}");
     }
 }

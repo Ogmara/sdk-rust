@@ -199,6 +199,168 @@ impl OgmaraClient {
         self.get("/api/v1/network/nodes").await
     }
 
+    /// GET /api/v1/network/identity (spec 03 §4.1, l2-node 0.48.0+).
+    ///
+    /// Lightweight self-description used by the Reachable probe in
+    /// spec 13 §10.9. When `url` is `Some`, queries that node
+    /// instead of the configured home — useful when verifying that
+    /// a presence-gossip claim resolves to the same PeerId.
+    pub async fn get_network_identity(
+        &self,
+        url: Option<&str>,
+    ) -> Result<NetworkIdentity, SdkError> {
+        match url {
+            Some(base) => {
+                let stripped = base.trim_end_matches('/');
+                self.get_absolute(&format!("{}/api/v1/network/identity", stripped))
+                    .await
+            }
+            None => self.get("/api/v1/network/identity").await,
+        }
+    }
+
+    /// GET /api/v1/network/presence (spec 13 §10.6, l2-node 0.48.0+).
+    ///
+    /// Returns the home node's cached presence-gossip records.
+    /// Each row is enriched server-side with `verified_on_chain` /
+    /// `anchored` / `last_anchor_at`. Returns an empty `records`
+    /// array on nodes with presence disabled.
+    pub async fn get_presence_records(&self) -> Result<PresenceResponse, SdkError> {
+        self.get("/api/v1/network/presence").await
+    }
+
+    /// GET /api/v1/network/presence/:peer_id (l2-node 0.48.0+).
+    ///
+    /// Returns the single cached record for `peer_id`, or `Ok(None)`
+    /// if the node hasn't cached one (TTL-evicted / not received /
+    /// presence disabled).
+    pub async fn get_presence_record(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<PresenceRecord>, SdkError> {
+        let path = format!("/api/v1/network/presence/{}", encode_path(peer_id));
+        match self.get::<PresenceRecord>(&path).await {
+            Ok(rec) => Ok(Some(rec)),
+            Err(SdkError::Api { status, .. }) if status == 404 => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Spec 5 §1.1 — merged client-side view of all known nodes.
+    ///
+    /// Joins the SC-derived `/network/nodes` response with the
+    /// off-chain `/network/presence` cache by libp2p PeerId. Each
+    /// result carries `attestation` (`OnChain` / `Gossip` / `Both`),
+    /// `anchoring`, and `trust_score` (0..=100, locked formula in
+    /// [`compute_trust_score`]).
+    ///
+    /// Results are sorted by `trust_score` descending — the sensible
+    /// default for failover selection. Apps building their own UI
+    /// may resort by latency, version, or any other field.
+    ///
+    /// `probe_cache` is an optional `peer_id -> unix_ms` map for the
+    /// +10 reachability contribution. Apps that maintain their own
+    /// probe state pass it here; otherwise scores top out at 90.
+    pub async fn get_known_nodes(
+        &self,
+        probe_cache: Option<&std::collections::HashMap<String, u64>>,
+    ) -> Result<Vec<KnownNode>, SdkError> {
+        let sc_resp = self
+            .list_nodes()
+            .await
+            .unwrap_or_else(|_| NodesResponse {
+                nodes: Vec::new(),
+                total: 0,
+                page: 0,
+            });
+        let presence_resp = self
+            .get_presence_records()
+            .await
+            .unwrap_or_else(|_| PresenceResponse {
+                self_peer_id: String::new(),
+                broadcasting: false,
+                cache_size: 0,
+                cache_cap: 4096,
+                records: Vec::new(),
+            });
+
+        let mut merged: std::collections::HashMap<String, KnownNode> =
+            std::collections::HashMap::new();
+
+        // Seed with SC view first — SC URL wins on conflict per
+        // spec 9 §3.2.2.
+        for n in sc_resp.nodes.iter() {
+            if n.node_id.is_empty() {
+                continue;
+            }
+            let anchoring = n
+                .anchor_status
+                .as_ref()
+                .map(|s| s.level == "active" || s.level == "verified")
+                .unwrap_or(false);
+            let age = n
+                .anchor_status
+                .as_ref()
+                .and_then(|s| s.last_anchor_age_seconds);
+            merged.insert(
+                n.node_id.clone(),
+                KnownNode {
+                    peer_id: n.node_id.clone(),
+                    url: n.api_endpoint.clone(),
+                    attestation: Attestation::OnChain,
+                    anchoring,
+                    anchor_age_seconds: age,
+                    presence_timestamp_ms: None,
+                    reachable_probe_at_ms: probe_cache
+                        .and_then(|m| m.get(&n.node_id).copied()),
+                    trust_score: 0,
+                },
+            );
+        }
+
+        // Layer presence records on top.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for rec in presence_resp.records.iter() {
+            if rec.peer_id.is_empty() {
+                continue;
+            }
+            if let Some(existing) = merged.get_mut(&rec.peer_id) {
+                existing.attestation = Attestation::Both;
+                existing.presence_timestamp_ms = Some(rec.timestamp.saturating_mul(1000));
+                if existing.url.is_none() && rec.public_url.is_some() {
+                    existing.url = rec.public_url.clone();
+                }
+            } else {
+                let age = rec.last_anchor_at.map(|t| now_secs.saturating_sub(t));
+                merged.insert(
+                    rec.peer_id.clone(),
+                    KnownNode {
+                        peer_id: rec.peer_id.clone(),
+                        url: rec.public_url.clone(),
+                        attestation: Attestation::Gossip,
+                        anchoring: rec.anchored,
+                        anchor_age_seconds: age,
+                        presence_timestamp_ms: Some(rec.timestamp.saturating_mul(1000)),
+                        reachable_probe_at_ms: probe_cache
+                            .and_then(|m| m.get(&rec.peer_id).copied()),
+                        trust_score: 0,
+                    },
+                );
+            }
+        }
+
+        // Score and sort desc.
+        let mut out: Vec<KnownNode> = merged.into_values().collect();
+        for node in out.iter_mut() {
+            node.trust_score = compute_trust_score(node);
+        }
+        out.sort_by(|a, b| b.trust_score.cmp(&a.trust_score));
+        Ok(out)
+    }
+
     /// GET /api/v1/users/:address/followers
     pub async fn get_followers(
         &self,
@@ -491,6 +653,19 @@ impl OgmaraClient {
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, SdkError> {
         let url = format!("{}{}", self.config.node_url, path);
         let resp = self.http.get(&url).send().await?;
+        handle_response(resp).await
+    }
+
+    /// Like [`Self::get`] but takes a fully-qualified URL — used to
+    /// target a node other than `self.config.node_url`. Currently
+    /// only [`Self::get_network_identity`] (spec 13 §10.9 Reachable
+    /// probe). No auth headers, no PoW retry: a probe shouldn't
+    /// burn the caller's PoW budget on the target.
+    async fn get_absolute<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> Result<T, SdkError> {
+        let resp = self.http.get(url).send().await?;
         handle_response(resp).await
     }
 

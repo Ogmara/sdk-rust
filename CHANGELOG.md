@@ -5,6 +5,49 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-01
+
+Presence-gossip consumer surface — spec 13 §10 + spec 5 §1.1.
+Parity with `sdk-js` v0.19.0. Lands alongside l2-node v0.48.0 which
+started serving the `/api/v1/network/presence*` and
+`/api/v1/network/identity` endpoints.
+
+### Added
+
+- **`OgmaraClient::get_known_nodes(probe_cache)` — high-level
+  merged view** of all network nodes. Joins `/network/nodes` (SC
+  view) with `/network/presence` (off-chain gossip cache) by
+  libp2p PeerId, returns `Vec<KnownNode>` sorted by `trust_score`
+  desc. Each row exposes `attestation` (`OnChain` / `Gossip` /
+  `Both` per spec 13 §10.8), `anchoring`, `anchor_age_seconds`,
+  optional `reachable_probe_at_ms`, and `trust_score: u8`
+  in `0..=100`.
+- **`OgmaraClient::get_network_identity(url)`** — wraps
+  `GET /api/v1/network/identity`. Optionally targets a non-home
+  URL so the Reachable probe (spec 13 §10.9) can verify gossip
+  claims.
+- **`OgmaraClient::get_presence_records()`** — wraps
+  `GET /api/v1/network/presence`.
+- **`OgmaraClient::get_presence_record(peer_id)`** — single-record
+  lookup, returns `Ok(None)` on 404.
+- **New types:** `NetworkIdentity`, `PresenceRecord`,
+  `PresenceResponse`, `KnownNode`, `Attestation`. The
+  `Attestation` enum serializes kebab-case (`on-chain`, `gossip`,
+  `both`) to match the cross-SDK + website JSON shape.
+- **`compute_trust_score(&KnownNode) -> u8`** — pure re-scoring
+  helper. Locked formula: +50 on-chain base, +30 anchoring (7d),
+  +10 cross-source consistency for `Both`, +10 reachable probe
+  within 24h. Caps at 100.
+- Unit tests (`types::presence_tests`) lock the score-table
+  contributions and the 100-cap saturation so future regressions
+  on the trust formula are caught at build.
+
+### References
+
+- Spec 13 §10: <https://github.com/Ogmara/ogmara/blob/main/docs/specs/13-node-discovery.md#10-presence-gossip-layer>
+- Spec 5 §1.1: <https://github.com/Ogmara/ogmara/blob/main/docs/specs/05-clients.md#11-node-failover--auto-discovery>
+- Planning: `docs/planning/presence-gossip-plan.md` (Ogmara hub)
+
 ## [0.5.0] - 2026-05-06
 
 ### Added
