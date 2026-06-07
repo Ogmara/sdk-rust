@@ -59,6 +59,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod encryption;
 pub mod error;
 pub mod types;
 pub mod ws;
@@ -66,5 +67,9 @@ pub mod ws;
 // Re-export main types for convenience
 pub use auth::WalletSigner;
 pub use client::{ClientConfig, OgmaraClient};
+pub use encryption::{
+    build_device_enc_binding, build_device_enc_revoke, enc_bind_claim, enc_public_key_hex,
+    enc_revoke_claim, generate_device_enc_keypair, normalize_wallet_sig, DeviceEncKeypair,
+};
 pub use error::SdkError;
 pub use types::*;

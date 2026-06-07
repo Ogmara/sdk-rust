@@ -1,6 +1,6 @@
 [package]
 name = "ogmara-sdk"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["Ogmara Contributors"]
 license = "MIT"
@@ -26,6 +26,7 @@ rmp-serde = "1.3"
 
 # Cryptography (same as L2 node — Klever ecosystem)
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 sha3 = "0.10"
 bech32 = "0.11"
 rand = "0.8"

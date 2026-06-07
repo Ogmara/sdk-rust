@@ -5,6 +5,23 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-07
+
+### Added
+
+- **Device encryption keys (E2E P0, protocol §2.4)** — new `encryption` module,
+  byte-for-byte parity with `sdk-js` v0.24.0 (shared cross-impl test vector):
+  - `generate_device_enc_keypair()` / `enc_public_key_hex()` — per-device X25519
+    keypair (distinct from the Ed25519 signing key); private key stays on-device.
+  - `build_device_enc_binding()` / `build_device_enc_revoke()` — wallet-authored
+    `DeviceEncBinding` (0x36) / `DeviceEncRevoke` (0x37) envelopes (author = wallet,
+    `msg_id` keyed to the wallet pubkey, signature = wallet Klever-message signature
+    over the canonical claim). `enc_bind_claim()` / `enc_revoke_claim()` expose the
+    exact claim; `klever_message_hash()` the signing preimage.
+  - `normalize_wallet_sig()` — canonicalizes a wallet `signMessage` return (hex /
+    base64-of-hex / raw bytes) into the 64 raw Ed25519 signature bytes.
+- New dependency `x25519-dalek` (with `static_secrets`).
+
 ## [0.6.0] - 2026-06-01
 
 Presence-gossip consumer surface — spec 13 §10 + spec 5 §1.1.
