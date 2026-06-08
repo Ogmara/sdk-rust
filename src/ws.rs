@@ -5,19 +5,55 @@
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
-use crate::auth::WalletSigner;
+use crate::auth::{NodeBinding, WalletSigner};
 use crate::error::SdkError;
-use crate::types::WsEvent;
+use crate::types::{Health, WsEvent};
+
+// Inbound frame/message size caps (audit 2026-06-07 W2). The SDK connects to
+// nodes discovered from untrusted SC/gossip; a hostile node could otherwise
+// stream a multi-GB frame and OOM the client. These bounds reject oversized
+// frames during the protocol read instead of buffering them.
+const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+const MAX_WS_FRAME_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Fetch the node's auth binding (`network` + `node_id`) from
+/// `GET {http_base}/api/v1/health`. Used by the WS connect path, which has
+/// no client instance to cache it on.
+async fn fetch_node_binding(http_base: &str) -> Result<NodeBinding, SdkError> {
+    let url = format!("{}/api/v1/health", http_base);
+    let health: Health = reqwest::get(&url)
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    match (health.node_id, health.network) {
+        (Some(node_id), Some(network)) if !node_id.is_empty() && !network.is_empty() => {
+            Ok(NodeBinding { network, node_id })
+        }
+        _ => Err(SdkError::Protocol(
+            "node /health lacks node_id/network — too old for host-bound auth".into(),
+        )),
+    }
+}
 
 /// A handle to an active WebSocket subscription.
 pub struct WsSubscription {
-    /// Receiver for incoming events.
-    pub events: mpsc::Receiver<WsEvent>,
+    /// Receiver for incoming events. Private because `WsSubscription` now
+    /// implements `Drop` (audit 2026-06-07 W5), which forbids moving fields
+    /// out of the struct — use [`Self::recv`] / [`Self::events_mut`] instead.
+    events: mpsc::Receiver<WsEvent>,
     /// Sender for outgoing commands (subscribe, unsubscribe, etc.).
     command_tx: mpsc::Sender<WsCommand>,
+    /// Handle to the background event loop task (audit 2026-06-07 W5).
+    /// Retained so `Drop` can abort it promptly — otherwise dropping the
+    /// subscription while the event receiver is gone would leave the task,
+    /// socket, and channels alive until the next inbound message.
+    task: JoinHandle<()>,
 }
 
 /// Commands that can be sent to the WebSocket.
@@ -30,6 +66,20 @@ enum WsCommand {
 }
 
 impl WsSubscription {
+    /// Receive the next event, or `None` once the connection closes.
+    ///
+    /// Replaces direct access to the (now private) `events` field, which `Drop`
+    /// (audit 2026-06-07 W5) prevents moving out of the struct.
+    pub async fn recv(&mut self) -> Option<WsEvent> {
+        self.events.recv().await
+    }
+
+    /// Mutable access to the underlying event receiver, for callers that need
+    /// `select!`/stream adapters over it.
+    pub fn events_mut(&mut self) -> &mut mpsc::Receiver<WsEvent> {
+        &mut self.events
+    }
+
     /// Subscribe to additional channels.
     pub async fn subscribe(&self, channels: Vec<String>) -> Result<(), SdkError> {
         self.command_tx
@@ -63,6 +113,22 @@ impl WsSubscription {
     }
 }
 
+impl Drop for WsSubscription {
+    /// Tear down the background task promptly when the subscription is dropped
+    /// (audit 2026-06-07 W5). Best-effort signal a graceful close, then abort
+    /// the task so an idle connection can't outlive its handle and leak the
+    /// task, socket, and channels.
+    fn drop(&mut self) {
+        // try_send (non-blocking) — Drop isn't async. If the loop is alive and
+        // the command buffer has room, it sees Close and shuts down cleanly.
+        let _ = self.command_tx.try_send(WsCommand::Close);
+        // Unconditionally abort: if the loop was wedged (e.g. stuck awaiting a
+        // never-arriving inbound message), this guarantees teardown. Aborting a
+        // task that has already finished is a no-op.
+        self.task.abort();
+    }
+}
+
 /// Connect to the node's authenticated WebSocket endpoint.
 ///
 /// Returns a subscription handle with an event receiver and command sender.
@@ -71,6 +137,11 @@ pub async fn connect(
     signer: &WalletSigner,
     channels: Vec<String>,
 ) -> Result<WsSubscription, SdkError> {
+    // Resolve the node identity the auth signature binds to (audit
+    // 2026-06-07 host-binding) from an unauthenticated /health fetch.
+    let http_base = node_url.trim_end_matches('/');
+    let binding = fetch_node_binding(http_base).await?;
+
     // Build WebSocket URL
     let ws_url = node_url
         .replace("http://", "ws://")
@@ -79,18 +150,28 @@ pub async fn connect(
 
     debug!(url = %ws_url, "Connecting to WebSocket");
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .map_err(|e| SdkError::WebSocket(format!("connect failed: {}", e)))?;
+    // Cap inbound frame/message sizes so an untrusted node can't OOM the
+    // client with an oversized payload (audit 2026-06-07 W2). 0.26 signature:
+    // connect_async_with_config(request, Option<WebSocketConfig>, disable_nagle).
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_WS_FRAME_SIZE));
+    let (ws_stream, _) =
+        tokio_tungstenite::connect_async_with_config(&ws_url, Some(ws_config), false)
+            .await
+            .map_err(|e| SdkError::WebSocket(format!("connect failed: {}", e)))?;
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Send auth as first message
-    let (auth, address, timestamp) = signer.sign_request("GET", "/api/v1/ws");
+    // Send auth as first message. Bound to {network, node_id} + a single-use
+    // nonce so a captured frame is neither fleet-portable nor replayable.
+    let (auth, address, timestamp, nonce) =
+        signer.sign_request(&binding.network, &binding.node_id, "GET", "/api/v1/ws");
     let auth_msg = serde_json::json!({
         "address": address,
         "timestamp": timestamp.parse::<u64>().unwrap_or(0),
         "signature": auth,
+        "nonce": nonce,
     });
     write
         .send(Message::Text(serde_json::to_string(&auth_msg).unwrap().into()))
@@ -113,8 +194,9 @@ pub async fn connect(
     let (event_tx, event_rx) = mpsc::channel(256);
     let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
 
-    // Spawn the WebSocket event loop
-    tokio::spawn(async move {
+    // Spawn the WebSocket event loop. The JoinHandle is retained on the
+    // subscription (audit 2026-06-07 W5) so Drop can abort it.
+    let task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 // Read from WebSocket
@@ -183,5 +265,6 @@ pub async fn connect(
     Ok(WsSubscription {
         events: event_rx,
         command_tx: cmd_tx,
+        task,
     })
 }

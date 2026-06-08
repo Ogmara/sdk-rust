@@ -4,14 +4,21 @@
 //! for all API operations. Supports automatic failover to other known
 //! nodes when the primary is unreachable.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::auth::WalletSigner;
+use crate::auth::{NodeBinding, WalletSigner};
 use crate::error::SdkError;
+use crate::pow::{PowChallenge, PowSolution};
 use crate::types::*;
+
+/// Maximum HTTP response body the SDK will buffer (audit 2026-06-07 W3).
+/// Nodes are discovered from untrusted SC/gossip; an oversized body would
+/// otherwise OOM the client. Bodies past this cap are rejected before
+/// deserialization. 32 MiB comfortably covers paginated API responses.
+const MAX_RESPONSE_BODY: u64 = 32 * 1024 * 1024;
 
 /// Configuration for the Ogmara SDK client.
 #[derive(Debug, Clone)]
@@ -64,6 +71,15 @@ pub struct OgmaraClient {
     signer: Option<WalletSigner>,
     /// Known nodes for failover.
     known_nodes: Vec<String>,
+    /// Cached node identity the auth signatures bind to (audit 2026-06-07
+    /// host-binding). Lazily fetched from `/api/v1/health` on the first
+    /// authenticated request, then reused.
+    binding: tokio::sync::OnceCell<NodeBinding>,
+    /// Whether this client has already solved a PoW challenge for the node
+    /// (audit 2026-06-07 W4). Once verified the wallet is "known", so we don't
+    /// re-solve or retry on subsequent requests. Interior mutability keeps the
+    /// public API `&self`.
+    pow_verified: AtomicBool,
 }
 
 impl OgmaraClient {
@@ -78,6 +94,8 @@ impl OgmaraClient {
             http,
             signer: None,
             known_nodes: Vec::new(),
+            binding: tokio::sync::OnceCell::new(),
+            pow_verified: AtomicBool::new(false),
         })
     }
 
@@ -502,19 +520,20 @@ impl OgmaraClient {
             target: target.to_string(),
         })?;
         // Send as DELETE with body
-        let (auth, address, timestamp) = signer.sign_request("DELETE", &format!("/api/v1/users/{}/follow", target));
-        let url = format!("{}/api/v1/users/{}/follow", self.config.node_url, target);
-        let resp = self
-            .http
-            .delete(&url)
-            .header("x-ogmara-auth", &auth)
-            .header("x-ogmara-address", &address)
-            .header("x-ogmara-timestamp", &timestamp)
-            .header("content-type", "application/octet-stream")
-            .body(envelope)
-            .send()
-            .await?;
-        handle_response(resp).await
+        let path = format!("/api/v1/users/{}/follow", target);
+        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
+        let url = format!("{}{}", self.config.node_url, path);
+        self.send(|| {
+            self.http
+                .delete(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+                .header("content-type", "application/octet-stream")
+                .body(envelope.clone())
+        })
+        .await
     }
 
     /// POST /api/v1/news/:msg_id/react — react to a news post.
@@ -567,20 +586,21 @@ impl OgmaraClient {
         limit: u32,
     ) -> Result<BookmarksResponse, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp) = signer.sign_request("GET", "/api/v1/bookmarks");
+        let (auth, address, timestamp, nonce) =
+            self.sign_auth(signer, "GET", "/api/v1/bookmarks").await?;
         let url = format!(
             "{}/api/v1/bookmarks?page={}&limit={}",
             self.config.node_url, page, limit
         );
-        let resp = self
-            .http
-            .get(&url)
-            .header("x-ogmara-auth", &auth)
-            .header("x-ogmara-address", &address)
-            .header("x-ogmara-timestamp", &timestamp)
-            .send()
-            .await?;
-        handle_response(resp).await
+        self.send(|| {
+            self.http
+                .get(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+        })
+        .await
     }
 
     /// POST /api/v1/bookmarks/:msg_id — save a post.
@@ -596,17 +616,17 @@ impl OgmaraClient {
     pub async fn remove_bookmark(&self, msg_id: &str) -> Result<serde_json::Value, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
         let path = format!("/api/v1/bookmarks/{}", msg_id);
-        let (auth, address, timestamp) = signer.sign_request("DELETE", &path);
+        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
         let url = format!("{}{}", self.config.node_url, path);
-        let resp = self
-            .http
-            .delete(&url)
-            .header("x-ogmara-auth", &auth)
-            .header("x-ogmara-address", &address)
-            .header("x-ogmara-timestamp", &timestamp)
-            .send()
-            .await?;
-        handle_response(resp).await
+        self.send(|| {
+            self.http
+                .delete(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+        })
+        .await
     }
 
     /// GET /api/v1/feed — personal news feed (posts from followed users).
@@ -616,20 +636,21 @@ impl OgmaraClient {
         limit: u32,
     ) -> Result<FeedResponse, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp) = signer.sign_request("GET", "/api/v1/feed");
+        let (auth, address, timestamp, nonce) =
+            self.sign_auth(signer, "GET", "/api/v1/feed").await?;
         let url = format!(
             "{}/api/v1/feed?page={}&limit={}",
             self.config.node_url, page, limit
         );
-        let resp = self
-            .http
-            .get(&url)
-            .header("x-ogmara-auth", &auth)
-            .header("x-ogmara-address", &address)
-            .header("x-ogmara-timestamp", &timestamp)
-            .send()
-            .await?;
-        handle_response(resp).await
+        self.send(|| {
+            self.http
+                .get(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+        })
+        .await
     }
 
     /// Discover nodes from the current home node and store for failover.
@@ -649,11 +670,12 @@ impl OgmaraClient {
 
     // --- Internal helpers ---
 
-    /// Make a GET request to the node.
+    /// Make a GET request to the node. Public reads; goes through the
+    /// PoW-aware sender (audit 2026-06-07 W4) since unknown wallets can be
+    /// challenged even on reads when a signer is attached.
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, SdkError> {
         let url = format!("{}{}", self.config.node_url, path);
-        let resp = self.http.get(&url).send().await?;
-        handle_response(resp).await
+        self.send(|| self.http.get(&url)).await
     }
 
     /// Like [`Self::get`] but takes a fully-qualified URL — used to
@@ -667,6 +689,41 @@ impl OgmaraClient {
     ) -> Result<T, SdkError> {
         let resp = self.http.get(url).send().await?;
         handle_response(resp).await
+    }
+
+    /// Resolve (and cache) the node identity that auth signatures bind to
+    /// (audit 2026-06-07 host-binding), from an unauthenticated
+    /// `GET /api/v1/health`. Must NOT route through the auth path, which
+    /// itself depends on this binding.
+    async fn node_binding(&self) -> Result<&NodeBinding, SdkError> {
+        self.binding
+            .get_or_try_init(|| async {
+                let health: Health = self.get("/api/v1/health").await?;
+                match (health.node_id, health.network) {
+                    (Some(node_id), Some(network))
+                        if !node_id.is_empty() && !network.is_empty() =>
+                    {
+                        Ok(NodeBinding { network, node_id })
+                    }
+                    _ => Err(SdkError::Protocol(
+                        "node /health lacks node_id/network — too old for host-bound auth"
+                            .into(),
+                    )),
+                }
+            })
+            .await
+    }
+
+    /// Sign auth headers for `method path`, binding to the cached node
+    /// identity. Returns `(auth_b64, address, timestamp, nonce)`.
+    async fn sign_auth(
+        &self,
+        signer: &WalletSigner,
+        method: &str,
+        path: &str,
+    ) -> Result<(String, String, String, String), SdkError> {
+        let b = self.node_binding().await?;
+        Ok(signer.sign_request(&b.network, &b.node_id, method, path))
     }
 
     /// Make an authenticated POST request with a serialized envelope.
@@ -685,21 +742,107 @@ impl OgmaraClient {
         body: Vec<u8>,
     ) -> Result<serde_json::Value, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp) = signer.sign_request("POST", path);
+        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "POST", path).await?;
 
         let url = format!("{}{}", self.config.node_url, path);
-        let resp = self
-            .http
-            .post(&url)
-            .header("x-ogmara-auth", &auth)
-            .header("x-ogmara-address", &address)
-            .header("x-ogmara-timestamp", &timestamp)
-            .header("content-type", "application/octet-stream")
-            .body(body)
-            .send()
-            .await?;
+        // PoW-aware send (audit 2026-06-07 W4): the closure rebuilds the request
+        // (incl. body clone) so it can be re-issued after solving a challenge.
+        self.send(|| {
+            self.http
+                .post(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+                .header("content-type", "application/octet-stream")
+                .body(body.clone())
+        })
+        .await
+    }
+
+    /// Send a request with automatic PoW handling (audit 2026-06-07 W4).
+    ///
+    /// `build` must produce a fresh `RequestBuilder` each call so the request
+    /// can be re-issued for the retry. On a 429 whose JSON body is
+    /// `{ error: "pow_required", challenge, address }`, this solves the
+    /// challenge, POSTs the solution to `/api/v1/pow/verify`, and retries the
+    /// original request exactly ONCE. The challenge difficulty is clamped
+    /// client-side (see [`crate::pow::MAX_POW_DIFFICULTY`]) so a hostile node
+    /// can't force unbounded work. All response bodies are size-bounded.
+    async fn send<T: serde::de::DeserializeOwned>(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<T, SdkError> {
+        let resp = build().send().await?;
+
+        // Only attempt PoW once per client: if already verified, or this is a
+        // non-PoW 429, fall through to normal handling.
+        if resp.status().as_u16() == 429 && !self.pow_verified.load(Ordering::Relaxed) {
+            let status = resp.status();
+            let body = read_bounded_body(resp).await?;
+            // Inspect the body for a pow_required challenge.
+            if let Ok(challenge_resp) = serde_json::from_slice::<PowChallengeResponse>(&body) {
+                if challenge_resp.error.as_deref() == Some("pow_required") {
+                    if let Some(challenge) = challenge_resp.challenge {
+                        self.solve_pow(&challenge, challenge_resp.address).await?;
+                        // Retry the original request exactly once.
+                        let retry = build().send().await?;
+                        return handle_response(retry).await;
+                    }
+                }
+            }
+            // 429 that isn't a solvable PoW challenge — surface as an API error.
+            return Err(SdkError::Api {
+                status: status.as_u16(),
+                message: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
 
         handle_response(resp).await
+    }
+
+    /// Solve a PoW challenge and submit the solution to the node, mirroring
+    /// sdk-js `solvePow` (audit 2026-06-07 W4).
+    ///
+    /// Uses the address from the node's 429 body when provided — it is the exact
+    /// `resolved_author` the node bound the challenge to (e.g. a device key that
+    /// resolves to a wallet), avoiding a klv1.../ogd1... mismatch. Sets
+    /// `pow_verified` on success so later requests skip PoW.
+    async fn solve_pow(
+        &self,
+        challenge: &PowChallenge,
+        resolved_address: Option<String>,
+    ) -> Result<(), SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let nonce = crate::pow::solve_challenge(challenge)?;
+
+        let solution = PowSolution {
+            challenge_id: challenge.challenge_id.clone(),
+            address: resolved_address.unwrap_or_else(|| signer.address().to_string()),
+            nonce,
+        };
+
+        let url = format!("{}/api/v1/pow/verify", self.config.node_url);
+        let resp = self.http.post(&url).json(&solution).send().await?;
+        let status = resp.status();
+        let body = read_bounded_body(resp).await?;
+        if !status.is_success() {
+            return Err(SdkError::Api {
+                status: status.as_u16(),
+                message: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+        // Node returns `{ "ok": true, ... }` on success.
+        let verify: PowVerifyResponse = serde_json::from_slice(&body)?;
+        if !verify.ok {
+            return Err(SdkError::Protocol(format!(
+                "PoW verification rejected: {}",
+                verify.error.unwrap_or_else(|| "unknown".into())
+            )));
+        }
+        self.pow_verified.store(true, Ordering::Relaxed);
+        debug!("PoW challenge solved and verified");
+        Ok(())
     }
 
     /// Build a MessagePack-serialized envelope for a typed payload.
@@ -777,20 +920,68 @@ fn encode_query(s: &str) -> String {
     out
 }
 
-/// Handle an HTTP response — check status and deserialize.
+/// Shape of a node 429 PoW challenge body (audit 2026-06-07 W4):
+/// `{ "error": "pow_required", "challenge": {...}, "address": "..." }`.
+#[derive(serde::Deserialize)]
+struct PowChallengeResponse {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    challenge: Option<PowChallenge>,
+    /// The `resolved_author` the node bound the challenge to.
+    #[serde(default)]
+    address: Option<String>,
+}
+
+/// Shape of the `/api/v1/pow/verify` response: `{ "ok": bool, "error"?: str }`.
+#[derive(serde::Deserialize)]
+struct PowVerifyResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Read an HTTP response body, enforcing [`MAX_RESPONSE_BODY`] (audit
+/// 2026-06-07 W3) so an untrusted node can't OOM the client with a huge body.
+/// Rejects up front on an oversized `Content-Length`, then enforces the cap on
+/// the bytes actually received (the header is advisory and may be absent/false).
+async fn read_bounded_body(resp: reqwest::Response) -> Result<Vec<u8>, SdkError> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BODY {
+            return Err(SdkError::Protocol(format!(
+                "response body too large: {} bytes (max {})",
+                len, MAX_RESPONSE_BODY
+            )));
+        }
+    }
+    // `bytes()` buffers the whole body; with the Content-Length guard above an
+    // honest node is already bounded. Re-check the actual length to catch a node
+    // that lies about (or omits) Content-Length.
+    let bytes = resp.bytes().await?;
+    if bytes.len() as u64 > MAX_RESPONSE_BODY {
+        return Err(SdkError::Protocol(format!(
+            "response body too large: {} bytes (max {})",
+            bytes.len(),
+            MAX_RESPONSE_BODY
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Check status and deserialize a (size-bounded) JSON response body.
+/// Used for the non-PoW paths (public reads, probes) where no retry applies.
 async fn handle_response<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, SdkError> {
     let status = resp.status();
+    let body = read_bounded_body(resp).await?;
     if !status.is_success() {
-        let message = resp.text().await.unwrap_or_default();
         return Err(SdkError::Api {
             status: status.as_u16(),
-            message,
+            message: String::from_utf8_lossy(&body).into_owned(),
         });
     }
-    let body = resp.json().await?;
-    Ok(body)
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// Extract @klv1... addresses from message content for auto-mention detection.

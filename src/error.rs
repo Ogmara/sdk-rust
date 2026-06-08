@@ -40,4 +40,9 @@ pub enum SdkError {
     /// MessagePack serialization error.
     #[error("MessagePack error: {0}")]
     MsgPack(String),
+
+    /// Protocol mismatch — e.g. the node is too old to support a required
+    /// feature (host-bound auth binding fields missing from `/health`).
+    #[error("protocol error: {0}")]
+    Protocol(String),
 }

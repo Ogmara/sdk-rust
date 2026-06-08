@@ -42,15 +42,14 @@
 //!
 //! # async fn example() -> Result<(), ogmara_sdk::SdkError> {
 //! let signer = WalletSigner::from_hex("your_hex_private_key")?;
-//! let sub = ws::connect(
+//! let mut sub = ws::connect(
 //!     "http://localhost:41721",
 //!     &signer,
 //!     vec!["1".into(), "2".into()], // channel IDs
 //! ).await?;
 //!
 //! // Receive events
-//! let mut events = sub.events;
-//! while let Some(event) = events.recv().await {
+//! while let Some(event) = sub.recv().await {
 //!     println!("Event: {:?}", event);
 //! }
 //! # Ok(())
@@ -61,6 +60,7 @@ pub mod auth;
 pub mod client;
 pub mod encryption;
 pub mod error;
+pub mod pow;
 pub mod types;
 pub mod ws;
 
@@ -72,4 +72,5 @@ pub use encryption::{
     enc_revoke_claim, generate_device_enc_keypair, normalize_wallet_sig, DeviceEncKeypair,
 };
 pub use error::SdkError;
+pub use pow::{PowChallenge, PowSolution};
 pub use types::*;

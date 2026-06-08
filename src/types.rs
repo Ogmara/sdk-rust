@@ -243,6 +243,15 @@ pub struct Health {
     pub status: String,
     pub version: String,
     pub peers: u32,
+    /// This node's Ogmara `node_id` (anchorer identity). Used to bind auth
+    /// signatures to a specific node (audit 2026-06-07 host-binding). Older
+    /// nodes omit it → `None`.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Klever network name ("testnet" / "mainnet"). The other half of the
+    /// auth binding. Older nodes omit it → `None`.
+    #[serde(default)]
+    pub network: Option<String>,
 }
 
 /// Network stats response.

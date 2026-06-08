@@ -5,6 +5,62 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-06-08
+
+### Removed
+
+- Cleanup (audit 2026-06-07 Batch 5 / N3): dropped the unused `url` dependency
+  and dead imports (`HeaderMap`/`HeaderValue`, `warn`).
+
+## [0.9.0] - 2026-06-08
+
+Transport hardening + PoW (audit 2026-06-07 fix-plan B4.3).
+
+### Added
+
+- **Proof-of-Work flow (W4).** On HTTP 429 `pow_required`, the client solves the
+  challenge (SHA-256 leading-zero-bits, matching the node + sdk-js byte-for-byte)
+  with a client-side difficulty clamp, verifies, and retries once. New `pow`
+  module (`PowChallenge`/`PowSolution`).
+
+### Security
+
+- **Inbound WS frame/message size caps (W2)** via `connect_async_with_config`
+  (16 MiB message / 4 MiB frame) — a hostile node can't OOM the client.
+- **HTTP response body cap (W3)** — bounded read (32 MiB) before deserialize.
+
+### Changed
+
+- **BREAKING:** `WsSubscription` now `impl Drop` (aborts the background task on
+  drop — fixes the W5 idle task/socket leak), so its `events` field is private;
+  use `recv()` / `events_mut()`. Added `sha2` dep.
+
+## [0.8.0] - 2026-06-08
+
+### Security
+
+- **Auth host-binding (audit C1, fix-plan B1.3).** `WalletSigner::sign_request`
+  now binds each auth signature to the target node's `network` + `node_id` plus
+  a fresh single-use `nonce` (CSPRNG), signing
+  `ogmara-auth:{network}:{node_id}:{nonce}:{timestamp}:{method}:{path}` and
+  sending a new `x-ogmara-nonce` header. A captured header can no longer be
+  replayed against another node/network or reused on the same node. The client
+  lazily fetches and caches the node identity from `GET /api/v1/health` (now
+  returns `node_id`/`network`); the WS connect path fetches it too and includes
+  the nonce in its auth frame. Requires l2-node ≥0.61.0.
+- **rustls-webpki 0.103.10 → 0.103.13 (RUSTSEC-2026-0098/0099/0104,
+  cross-cutting B1.5)** — fixes weakened cert-chain validation + a reachable CRL
+  panic on `wss://`/`https://` connections.
+
+### Changed
+
+- **BREAKING:** `WalletSigner::sign_request(method, path) -> (auth, address,
+  timestamp)` → `sign_request(network, node_id, method, path) -> (auth, address,
+  timestamp, nonce)`. New public items: `auth::NodeBinding`,
+  `auth::random_nonce_hex`, `SdkError::Protocol`. `Health` gains optional
+  `node_id` / `network` fields. Most consumers use `OgmaraClient` and need no
+  changes.
+
 ## [0.7.0] - 2026-06-07
 
 ### Added

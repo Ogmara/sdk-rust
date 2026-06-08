@@ -16,6 +16,27 @@ use crate::error::SdkError;
 /// Klever message signing prefix (from kos-rs).
 const KLEVER_MSG_PREFIX: &[u8] = b"\x17Klever Signed Message:\n";
 
+/// The node identity an auth signature binds to (audit 2026-06-07
+/// host-binding). Fetched once from `GET /api/v1/health` and cached by the
+/// client; binding `{network, node_id}` defeats cross-node replay.
+#[derive(Debug, Clone)]
+pub struct NodeBinding {
+    /// Klever network ("testnet" / "mainnet").
+    pub network: String,
+    /// Target node's Ogmara `node_id`.
+    pub node_id: String,
+}
+
+/// Generate a random single-use nonce as a lowercase hex string (16 bytes).
+/// Uses the OS CSPRNG (`OsRng`) — never a weak PRNG, so an attacker cannot
+/// pre-compute nonces to defeat the verifier's replay cache.
+pub fn random_nonce_hex() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
 /// A signer that can produce auth headers for authenticated API calls.
 pub struct WalletSigner {
     signing_key: SigningKey,
@@ -60,24 +81,35 @@ impl WalletSigner {
 
     /// Build auth headers for an API request.
     ///
-    /// Returns (auth_b64, address, timestamp_ms).
+    /// The signature is bound to the target node's `network` + `node_id`
+    /// plus a fresh single-use `nonce` (audit 2026-06-07 host-binding), so
+    /// a captured header is neither portable to another node nor replayable
+    /// to this one.
+    ///
+    /// Returns `(auth_b64, address, timestamp_ms, nonce)`.
     pub fn sign_request(
         &self,
+        network: &str,
+        node_id: &str,
         method: &str,
         path: &str,
-    ) -> (String, String, String) {
+    ) -> (String, String, String, String) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let auth_string = format!("ogmara-auth:{}:{}:{}", timestamp, method, path);
+        let nonce = random_nonce_hex();
+        let auth_string = format!(
+            "ogmara-auth:{}:{}:{}:{}:{}:{}",
+            network, node_id, nonce, timestamp, method, path
+        );
         let signature = sign_klever_message(&self.signing_key, auth_string.as_bytes());
 
         let auth_b64 = base64::engine::general_purpose::STANDARD
             .encode(signature.to_bytes());
 
-        (auth_b64, self.address.clone(), timestamp.to_string())
+        (auth_b64, self.address.clone(), timestamp.to_string(), nonce)
     }
 
     /// Sign an Ogmara protocol message (for envelope construction).
@@ -150,10 +182,23 @@ mod tests {
     fn test_sign_request_produces_valid_output() {
         let key = SigningKey::generate(&mut rand::rngs::OsRng);
         let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
-        let (auth, addr, ts) = signer.sign_request("GET", "/api/v1/health");
+        let (auth, addr, ts, nonce) =
+            signer.sign_request("testnet", "node-abc", "GET", "/api/v1/health");
         assert!(!auth.is_empty());
         assert!(addr.starts_with("klv1"));
         assert!(ts.parse::<u64>().is_ok());
+        // Host-binding nonce (audit 2026-06-07): 16 bytes → 32 hex chars.
+        assert_eq!(nonce.len(), 32);
+        assert!(nonce.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sign_request_nonce_is_fresh() {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
+        let (_, _, _, n1) = signer.sign_request("testnet", "n", "GET", "/x");
+        let (_, _, _, n2) = signer.sign_request("testnet", "n", "GET", "/x");
+        assert_ne!(n1, n2);
     }
 
     #[test]
