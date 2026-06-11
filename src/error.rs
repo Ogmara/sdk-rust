@@ -45,4 +45,10 @@ pub enum SdkError {
     /// feature (host-bound auth binding fields missing from `/health`).
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// E2E crypto failure — AEAD authentication failure, invalid key material,
+    /// or a rejected low-order DH share. Deliberately opaque: never leak which
+    /// step failed to a caller (timing/oracle hygiene).
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }

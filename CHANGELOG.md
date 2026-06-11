@@ -5,6 +5,33 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-11
+
+E2E encryption P1 — shared crypto core (matches sdk-js `crypto.ts` byte-for-byte).
+
+### Added
+
+- **`crypto` module** — the symmetric content-encryption + key-wrapping core for
+  E2E (protocol §8). Audited primitives wrapped behind Ogmara-native names:
+  - `aead_encrypt` / `aead_decrypt` — XChaCha20-Poly1305 (24-byte nonce); `aad`
+    binds ciphertext to its envelope.
+  - `hkdf_sha256` — HKDF-SHA256 (RFC 5869).
+  - `x25519_dh` / `x25519_public` — X25519 DH with all-zero (low-order) rejection.
+  - `wrap_key` / `wrap_key_with` / `unwrap_key` + `WrappedKey` — ECIES key wrap to
+    a recipient device enc pubkey: `wk = HKDF(X25519(eph, R_pub), salt=context,
+    info="ogmara-keywrap-v1")`, `wrapped = AEAD(wk, nonce, K, aad=eph_pub)`.
+  - Constants `KEY_LEN` (32), `AEAD_NONCE_LEN` (24), `AEAD_TAG_LEN` (16).
+- **Cross-impl test vectors** asserted identically in sdk-js: RFC 5869 HKDF case 1,
+  draft-irtf-cfrg-xchacha-03 §A.3.1 AEAD KAT, and an Ogmara deterministic wrap KAT.
+- `SdkError::Crypto` variant for opaque crypto failures (no oracle leakage).
+
+### Dependencies
+
+- Added `chacha20poly1305 0.10` and `hkdf 0.12`. `hkdf` is pinned to the `0.12`
+  line (not `0.13`) to stay in the `digest 0.10` / `sha2 0.10` ecosystem that
+  `ed25519-dalek 2.2` requires — `hkdf 0.13` pulls `hmac 0.13`/`digest 0.11` and
+  would fracture the digest trait ecosystem.
+
 ## [0.9.1] - 2026-06-08
 
 ### Removed

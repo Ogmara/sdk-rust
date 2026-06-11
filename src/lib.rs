@@ -58,6 +58,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod crypto;
 pub mod encryption;
 pub mod error;
 pub mod pow;
@@ -67,6 +68,10 @@ pub mod ws;
 // Re-export main types for convenience
 pub use auth::WalletSigner;
 pub use client::{ClientConfig, OgmaraClient};
+pub use crypto::{
+    aead_decrypt, aead_encrypt, hkdf_sha256, unwrap_key, wrap_key, wrap_key_with, x25519_dh,
+    x25519_public, WrappedKey, AEAD_NONCE_LEN, AEAD_TAG_LEN, KEY_LEN,
+};
 pub use encryption::{
     build_device_enc_binding, build_device_enc_revoke, enc_bind_claim, enc_public_key_hex,
     enc_revoke_claim, generate_device_enc_keypair, normalize_wallet_sig, DeviceEncKeypair,
