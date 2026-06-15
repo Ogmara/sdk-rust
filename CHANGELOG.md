@@ -5,6 +5,19 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-06-15
+
+### Added
+
+- **Encrypted media crypto (P5 / D6 — protocol §8, spec 04 §9).** New `media`
+  module: `encrypt_file` / `encrypt_thumbnail` / `decrypt_media` seal file bytes
+  with a fresh per-file XChaCha20-Poly1305 key (`aad = "ogmara-media-v1"`) before
+  IPFS upload, plus `MediaDescriptor` (the per-file key + real mime/filename that
+  rides inside the message's already-encrypted content). Mirrors sdk-js `media.ts`;
+  a fixed KAT asserts byte-for-byte parity (`dabfaaef…` for key 1..=32 / nonce
+  1..=24 / "ogmara"). The higher-level send/render orchestration stays in the JS
+  SDK + clients (no Rust media consumer yet — same scope as the deferred DM mirror).
+
 ## [0.10.0] - 2026-06-11
 
 E2E encryption P1 — shared crypto core (matches sdk-js `crypto.ts` byte-for-byte).

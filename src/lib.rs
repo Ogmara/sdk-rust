@@ -61,6 +61,7 @@ pub mod client;
 pub mod crypto;
 pub mod encryption;
 pub mod error;
+pub mod media;
 pub mod pow;
 pub mod types;
 pub mod ws;
