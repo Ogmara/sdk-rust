@@ -108,9 +108,19 @@ pub fn address_to_pubkey(address: &str) -> Result<[u8; 32], SdkError> {
 }
 
 /// Canonical claim the WALLET signs to bind a device encryption key (§2.4).
-pub fn enc_bind_claim(enc_pub_hex: &str, device_id_hex: &str, wallet: &str, ts: u64) -> String {
+/// `network` binds the claim to a single Klever network (audit 2026-08-16 C1
+/// follow-up — this signature is the sole authority and never covers a
+/// msg_id, so it needs its own network binding).
+pub fn enc_bind_claim(
+    network: &str,
+    enc_pub_hex: &str,
+    device_id_hex: &str,
+    wallet: &str,
+    ts: u64,
+) -> String {
     format!(
-        "ogmara-enc-bind:{}:{}:{}:{}",
+        "ogmara-enc-bind:{}:{}:{}:{}:{}",
+        network,
         enc_pub_hex.to_lowercase(),
         device_id_hex.to_lowercase(),
         wallet,
@@ -119,9 +129,11 @@ pub fn enc_bind_claim(enc_pub_hex: &str, device_id_hex: &str, wallet: &str, ts: 
 }
 
 /// Canonical claim the WALLET signs to revoke a device encryption key (§2.4).
-pub fn enc_revoke_claim(enc_pub_hex: &str, wallet: &str, ts: u64) -> String {
+/// See [`enc_bind_claim`] for `network`.
+pub fn enc_revoke_claim(network: &str, enc_pub_hex: &str, wallet: &str, ts: u64) -> String {
     format!(
-        "ogmara-enc-revoke:{}:{}:{}",
+        "ogmara-enc-revoke:{}:{}:{}:{}",
+        network,
         enc_pub_hex.to_lowercase(),
         wallet,
         ts
@@ -154,8 +166,20 @@ struct EncEnvelopeWire<'a> {
     relay_path: Vec<String>,
 }
 
-fn compute_msg_id_for_author(author_pubkey: &[u8; 32], payload: &[u8], ts: u64) -> [u8; 32] {
-    let mut data = Vec::with_capacity(32 + payload.len() + 8);
+/// Compute a message ID (protocol v2, audit 2026-08-16 C1):
+/// `Keccak-256(network_len(1) + network + author_pubkey + payload + timestamp)`.
+/// Mirrors `WalletSigner::compute_msg_id` (auth.rs) and sdk-js's
+/// `computeMsgIdForAuthor` — must never drift apart.
+fn compute_msg_id_for_author(
+    network: &str,
+    author_pubkey: &[u8; 32],
+    payload: &[u8],
+    ts: u64,
+) -> [u8; 32] {
+    let network_bytes = network.as_bytes();
+    let mut data = Vec::with_capacity(1 + network_bytes.len() + 32 + payload.len() + 8);
+    data.push(network_bytes.len() as u8);
+    data.extend_from_slice(network_bytes);
     data.extend_from_slice(author_pubkey);
     data.extend_from_slice(payload);
     data.extend_from_slice(&ts.to_be_bytes());
@@ -168,12 +192,13 @@ fn build_enc_envelope(
     payload: Vec<u8>,
     sig: [u8; 64],
     ts: u64,
+    network: &str,
 ) -> Result<Vec<u8>, SdkError> {
     // WALLET-authored: author = wallet, msg_id keyed to the wallet pubkey, signature
     // is the wallet's Klever-message signature over the canonical claim.
-    let msg_id = compute_msg_id_for_author(&address_to_pubkey(wallet)?, &payload, ts);
+    let msg_id = compute_msg_id_for_author(network, &address_to_pubkey(wallet)?, &payload, ts);
     let env = EncEnvelopeWire {
-        version: 1,
+        version: crate::types::PROTOCOL_VERSION,
         msg_type,
         msg_id,
         author: wallet,
@@ -189,33 +214,43 @@ fn build_enc_envelope(
 /// Build a wallet-authored `DeviceEncBinding` (0x36) envelope. `sig` is the wallet's
 /// 64-byte Klever-message signature over [`enc_bind_claim`] (run it through
 /// [`normalize_wallet_sig`] first if it came from an external wallet as a string).
+///
+/// `network` ("testnet"/"mainnet", e.g. from the client's cached `/health`
+/// binding) binds both the envelope's msg_id AND — since the caller built
+/// `sig` externally — MUST be the exact same value passed to
+/// [`enc_bind_claim`] when the claim was signed (audit 2026-08-16 C1);
+/// required since this builder has no client/signer object to resolve it
+/// from.
 pub fn build_device_enc_binding(
     wallet: &str,
     enc_pub_hex: &str,
     device_id_hex: &str,
     sig: [u8; 64],
     ts: u64,
+    network: &str,
 ) -> Result<Vec<u8>, SdkError> {
     let payload = rmp_serde::to_vec_named(&BindPayload {
         device_id: device_id_hex.to_lowercase(),
         enc_pub: enc_pub_hex.to_lowercase(),
     })
     .map_err(|e| SdkError::MsgPack(e.to_string()))?;
-    build_enc_envelope("DeviceEncBinding", wallet, payload, sig, ts)
+    build_enc_envelope("DeviceEncBinding", wallet, payload, sig, ts, network)
 }
 
-/// Build a wallet-authored `DeviceEncRevoke` (0x37) envelope.
+/// Build a wallet-authored `DeviceEncRevoke` (0x37) envelope. See
+/// [`build_device_enc_binding`] for the `network` parameter.
 pub fn build_device_enc_revoke(
     wallet: &str,
     enc_pub_hex: &str,
     sig: [u8; 64],
     ts: u64,
+    network: &str,
 ) -> Result<Vec<u8>, SdkError> {
     let payload = rmp_serde::to_vec_named(&RevokePayload {
         enc_pub: enc_pub_hex.to_lowercase(),
     })
     .map_err(|e| SdkError::MsgPack(e.to_string()))?;
-    build_enc_envelope("DeviceEncRevoke", wallet, payload, sig, ts)
+    build_enc_envelope("DeviceEncRevoke", wallet, payload, sig, ts, network)
 }
 
 #[cfg(test)]
@@ -244,8 +279,10 @@ mod tests {
     }
 
     // CROSS-IMPL VECTOR — identical literals are asserted in sdk-js
-    // `encryption.test.ts`. Wallet private key = bytes 0x01..0x20. Any byte-drift
-    // between the two SDKs (or vs the L2 node) breaks one of these suites.
+    // `encryption.test.ts`. Wallet private key = bytes 0x01..0x20,
+    // network = "testnet" (audit 2026-08-16 C1 — msg_id is now network-bound).
+    // Any byte-drift between the two SDKs (or vs the L2 node) breaks one of
+    // these suites.
     #[test]
     fn cross_impl_vector_matches_sdk_js() {
         let priv_bytes: [u8; 32] = core::array::from_fn(|i| (i + 1) as u8);
@@ -262,11 +299,11 @@ mod tests {
         let ts: u64 = 1_717_958_400_000;
 
         // Sign the canonical claim in Klever message format (deterministic Ed25519).
-        let claim = enc_bind_claim(enc_pub, device_id, wallet, ts);
+        let claim = enc_bind_claim("testnet", enc_pub, device_id, wallet, ts);
         let sig = sk.sign(&klever_message_hash(claim.as_bytes())).to_bytes();
         assert_eq!(
             hex::encode(sig),
-            "0fa1a8132831b3542f8392b2332e9de509c849e0cd7980b5dc63e51acfcc3de19e28f72b61cebcdc8b4a4c8c6477c21e4d1e27a30667388c92a7ff4081f1220c"
+            "cb6056cd0ad6b4fb1bcd29f104733f21ae5decb8d365a7dfb530671349a28006d92bdb2f82bbd20e5a236fc8d2c8ddcf073afc171c0fef80174ea29e74de470a"
         );
 
         // Payload bytes (and thus msg_id) must match the JS @msgpack map encoding.
@@ -275,13 +312,18 @@ mod tests {
             enc_pub: enc_pub.to_string(),
         })
         .unwrap();
-        let msg_id = compute_msg_id_for_author(&address_to_pubkey(wallet).unwrap(), &payload, ts);
+        let msg_id = compute_msg_id_for_author(
+            "testnet",
+            &address_to_pubkey(wallet).unwrap(),
+            &payload,
+            ts,
+        );
         assert_eq!(
             hex::encode(msg_id),
-            "5d9a8ae182c8b7712f4bcf164711fb7cda1107e300a417364fdbc86ed39fa91b"
+            "4c9a58d20d839495766428e144641a6d0a94213e7bc604d030d5c7053138e99e"
         );
 
         // The full builder runs without error.
-        assert!(build_device_enc_binding(wallet, enc_pub, device_id, sig, ts).is_ok());
+        assert!(build_device_enc_binding(wallet, enc_pub, device_id, sig, ts, "testnet").is_ok());
     }
 }

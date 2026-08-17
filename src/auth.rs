@@ -113,16 +113,30 @@ impl WalletSigner {
     }
 
     /// Sign an Ogmara protocol message (for envelope construction).
+    ///
+    /// Format (protocol v2, audit 2026-08-16 C1): `"ogmara-msg:" +
+    /// network_len(1) + network + version(1) + msg_type(1) + msg_id(32) +
+    /// timestamp(8) + payload`. `network` ("testnet"/"mainnet") binds the
+    /// signature to a single Klever network — mirrors
+    /// `signing::ogmara_signed_bytes` in the node (l2-node
+    /// `crypto/signing.rs`) and `WalletSigner.signEnvelope` in sdk-js; all
+    /// three must never drift apart.
     pub fn sign_envelope(
         &self,
+        network: &str,
         version: u8,
         msg_type: u8,
         msg_id: &[u8; 32],
         timestamp: u64,
         payload: &[u8],
     ) -> Vec<u8> {
-        let mut signed_bytes = Vec::with_capacity(11 + 1 + 1 + 32 + 8 + payload.len());
+        let network_bytes = network.as_bytes();
+        let mut signed_bytes = Vec::with_capacity(
+            11 + 1 + network_bytes.len() + 1 + 1 + 32 + 8 + payload.len(),
+        );
         signed_bytes.extend_from_slice(b"ogmara-msg:");
+        signed_bytes.push(network_bytes.len() as u8);
+        signed_bytes.extend_from_slice(network_bytes);
         signed_bytes.push(version);
         signed_bytes.push(msg_type);
         signed_bytes.extend_from_slice(msg_id);
@@ -134,9 +148,15 @@ impl WalletSigner {
         signature.to_bytes().to_vec()
     }
 
-    /// Compute a message ID: Keccak-256(author_pubkey + payload + timestamp).
-    pub fn compute_msg_id(&self, payload: &[u8], timestamp: u64) -> [u8; 32] {
-        let mut data = Vec::with_capacity(32 + payload.len() + 8);
+    /// Compute a message ID (protocol v2, audit 2026-08-16 C1):
+    /// `Keccak-256(network_len(1) + network + author_pubkey + payload + timestamp)`.
+    /// Mirrors `crypto::compute_msg_id` in the node and `computeMsgId` in
+    /// sdk-js — must never drift apart.
+    pub fn compute_msg_id(&self, network: &str, payload: &[u8], timestamp: u64) -> [u8; 32] {
+        let network_bytes = network.as_bytes();
+        let mut data = Vec::with_capacity(1 + network_bytes.len() + 32 + payload.len() + 8);
+        data.push(network_bytes.len() as u8);
+        data.extend_from_slice(network_bytes);
         data.extend_from_slice(self.signing_key.verifying_key().as_bytes());
         data.extend_from_slice(payload);
         data.extend_from_slice(&timestamp.to_be_bytes());
@@ -205,16 +225,28 @@ mod tests {
     fn test_compute_msg_id_deterministic() {
         let key = SigningKey::generate(&mut rand::rngs::OsRng);
         let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
-        let id1 = signer.compute_msg_id(b"hello", 12345);
-        let id2 = signer.compute_msg_id(b"hello", 12345);
+        let id1 = signer.compute_msg_id("testnet", b"hello", 12345);
+        let id2 = signer.compute_msg_id("testnet", b"hello", 12345);
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_compute_msg_id_binds_to_network() {
+        // C1 regression: same author/payload/timestamp must produce a
+        // DIFFERENT msg_id per network — otherwise a testnet envelope's
+        // msg_id would collide with its mainnet counterpart.
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
+        let testnet_id = signer.compute_msg_id("testnet", b"hello", 12345);
+        let mainnet_id = signer.compute_msg_id("mainnet", b"hello", 12345);
+        assert_ne!(testnet_id, mainnet_id);
     }
 
     #[test]
     fn test_sign_envelope() {
         let key = SigningKey::generate(&mut rand::rngs::OsRng);
         let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
-        let sig = signer.sign_envelope(1, 0x01, &[0u8; 32], 12345, b"payload");
+        let sig = signer.sign_envelope("testnet", 2, 0x01, &[0u8; 32], 12345, b"payload");
         assert_eq!(sig.len(), 64);
     }
 }

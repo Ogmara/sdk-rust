@@ -472,7 +472,7 @@ impl OgmaraClient {
             attachments: Vec::new(),
         };
 
-        let envelope = self.build_envelope(signer, 0x01, &payload)?;
+        let envelope = self.build_envelope(signer, 0x01, &payload).await?;
         self.post_authenticated("/api/v1/messages", &envelope).await
     }
 
@@ -487,7 +487,7 @@ impl OgmaraClient {
         encrypted_payload: Vec<u8>,
     ) -> Result<serde_json::Value, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let envelope_bytes = self.build_raw_envelope(signer, 0x05, &encrypted_payload)?;
+        let envelope_bytes = self.build_raw_envelope(signer, 0x05, &encrypted_payload).await?;
         self.post_authenticated_raw(
             &format!("/api/v1/dm/{}", recipient),
             envelope_bytes,
@@ -504,7 +504,7 @@ impl OgmaraClient {
 
         let envelope = self.build_envelope(signer, 0x34, &FollowPayload {
             target: target.to_string(),
-        })?;
+        }).await?;
         self.post_authenticated(&format!("/api/v1/users/{}/follow", target), &envelope)
             .await
     }
@@ -518,7 +518,7 @@ impl OgmaraClient {
 
         let envelope = self.build_envelope(signer, 0x35, &UnfollowPayload {
             target: target.to_string(),
-        })?;
+        }).await?;
         // Send as DELETE with body
         let path = format!("/api/v1/users/{}/follow", target);
         let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
@@ -550,7 +550,7 @@ impl OgmaraClient {
             emoji: emoji.to_string(),
             remove,
         };
-        let envelope = self.build_envelope(signer, MessageType::NEWS_REACTION, &payload)?;
+        let envelope = self.build_envelope(signer, MessageType::NEWS_REACTION, &payload).await?;
         self.post_authenticated(
             &format!("/api/v1/news/{}/react", hex::encode(msg_id)),
             &envelope,
@@ -571,7 +571,7 @@ impl OgmaraClient {
             original_author: original_author.to_string(),
             comment: comment.map(|s| s.to_string()),
         };
-        let envelope = self.build_envelope(signer, MessageType::NEWS_REPOST, &payload)?;
+        let envelope = self.build_envelope(signer, MessageType::NEWS_REPOST, &payload).await?;
         self.post_authenticated(
             &format!("/api/v1/news/{}/repost", hex::encode(original_id)),
             &envelope,
@@ -846,7 +846,7 @@ impl OgmaraClient {
     }
 
     /// Build a MessagePack-serialized envelope for a typed payload.
-    fn build_envelope<T: serde::Serialize>(
+    async fn build_envelope<T: serde::Serialize>(
         &self,
         signer: &WalletSigner,
         msg_type: u8,
@@ -854,11 +854,15 @@ impl OgmaraClient {
     ) -> Result<Vec<u8>, SdkError> {
         let payload_bytes =
             rmp_serde::to_vec(payload).map_err(|e| SdkError::MsgPack(e.to_string()))?;
-        self.build_raw_envelope(signer, msg_type, &payload_bytes)
+        self.build_raw_envelope(signer, msg_type, &payload_bytes).await
     }
 
     /// Build a MessagePack-serialized envelope from raw payload bytes.
-    fn build_raw_envelope(
+    ///
+    /// Resolves (and caches, via `node_binding`) the target node's network
+    /// first — the msg_id/signature are network-bound (audit 2026-08-16 C1),
+    /// so this can no longer be a synchronous, network-agnostic call.
+    async fn build_raw_envelope(
         &self,
         signer: &WalletSigner,
         msg_type: u8,
@@ -869,11 +873,19 @@ impl OgmaraClient {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let msg_id = signer.compute_msg_id(payload_bytes, timestamp);
-        let signature = signer.sign_envelope(1, msg_type, &msg_id, timestamp, payload_bytes);
+        let network = self.node_binding().await?.network.clone();
+        let msg_id = signer.compute_msg_id(&network, payload_bytes, timestamp);
+        let signature = signer.sign_envelope(
+            &network,
+            PROTOCOL_VERSION,
+            msg_type,
+            &msg_id,
+            timestamp,
+            payload_bytes,
+        );
 
         let envelope = Envelope {
-            version: 1,
+            version: PROTOCOL_VERSION,
             msg_type,
             msg_id,
             author: signer.address().to_string(),

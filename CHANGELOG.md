@@ -5,6 +5,45 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-17
+
+### Security
+
+- **Cross-network envelope replay (l2-node final pre-mainnet audit C1) —
+  coordinated wire-format cutover.** `WalletSigner::compute_msg_id` /
+  `sign_envelope` now fold the target Klever `network` ("testnet"/"mainnet")
+  into the msg_id and signing preimage, matching l2-node 0.83.0's
+  `PROTOCOL_VERSION` 1 → 2 hard cutover and sdk-js 0.42.0's equivalent fix
+  (byte-for-byte parity verified by `cross_impl_vector_matches_sdk_js`).
+  `OgmaraClient::build_raw_envelope` (and thus every write method) is now
+  network-aware: it resolves the target node's network via the existing
+  cached `node_binding()` before building an envelope, so no public API
+  signature changed there. `build_device_enc_binding`/`build_device_enc_revoke`
+  (`encryption.rs`) gain a new **required** `network: &str` parameter — these
+  build wallet-authored envelopes outside `OgmaraClient`, so callers must
+  supply it explicitly.
+- **Breaking:** hard wire-format cutover paired with l2-node 0.83.0 —
+  envelopes built by this version are rejected by any l2-node older than
+  0.83.0, and vice versa. Ships together with matching bumps in `sdk-js`,
+  `web`, `desktop`, and `mobile`.
+- **Same finding, second signing scheme (post-fix internal audit).** The
+  envelope fix above doesn't cover `DeviceDelegation`/`DeviceEncBinding`/
+  `DeviceEncRevoke` — these sign a fixed **claim string**, never a msg_id,
+  so folding `network` into `compute_msg_id` gave them no real protection
+  (msg_id is a public hash, not a MAC). Fixed by folding `network` into
+  `enc_bind_claim`/`enc_revoke_claim` (`encryption.rs`), now required
+  parameters — `cross_impl_vector_matches_sdk_js` re-verified byte-for-byte
+  parity against sdk-js's equivalent fix.
+
+### Fixed
+
+- `cargo audit`: bumped `quinn-proto` 0.11.14 → 0.11.16 past a high-severity
+  remote memory-exhaustion advisory (RUSTSEC-2026-0185). It's an unused
+  optional dependency of `reqwest`'s `http3` feature (not enabled by this
+  crate, confirmed absent from `cargo tree`) — build-tooling/lockfile residue
+  only, never compiled into the shipped binary — but bumped anyway for
+  lockfile hygiene.
+
 ## [0.11.0] - 2026-06-15
 
 ### Added

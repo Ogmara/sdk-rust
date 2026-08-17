@@ -80,6 +80,15 @@ impl Channel {
 
 // --- Message Envelope ---
 
+/// Current Ogmara envelope protocol version (spec 3.1).
+///
+/// Bumped 1 -> 2 for the audit 2026-08-16 C1 fix: signed envelope preimages
+/// now fold in the target network_id (see `WalletSigner::sign_envelope`/
+/// `compute_msg_id` in `auth.rs`). Mirrors `PROTOCOL_VERSION` in the node
+/// (l2-node `messages/envelope.rs`) and sdk-js `types.ts` — must never drift
+/// apart; the node hard-rejects any other version.
+pub const PROTOCOL_VERSION: u8 = 2;
+
 /// A message envelope as returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
