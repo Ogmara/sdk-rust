@@ -579,6 +579,62 @@ impl OgmaraClient {
         .await
     }
 
+    /// POST /api/v1/channels/:channel_id/mute/:address — mute a user in a
+    /// channel (moderator action). First moderation-action client support in
+    /// sdk-rust — ban/kick/unban remain unimplemented here, a separate
+    /// pre-existing gap not addressed by this fix (audit W30).
+    pub async fn mute_user(
+        &self,
+        channel_id: u64,
+        target_user: &str,
+        duration_secs: u64,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let payload = ChannelMutePayload {
+            channel_id,
+            target_user: target_user.to_string(),
+            duration_secs,
+            reason: reason.map(|s| s.to_string()),
+        };
+        let envelope = self.build_envelope(signer, MessageType::CHANNEL_MUTE, &payload).await?;
+        self.post_authenticated(
+            &format!("/api/v1/channels/{}/mute/{}", channel_id, target_user),
+            &envelope,
+        )
+        .await
+    }
+
+    /// DELETE /api/v1/channels/:channel_id/mute/:address — unmute a user in
+    /// a channel. Reverses `mute_user` (l2-node 0.93.0+, audit W30) — a
+    /// permanent mute (`duration_secs: 0`) had no way back before this.
+    pub async fn unmute_user(
+        &self,
+        channel_id: u64,
+        target_user: &str,
+    ) -> Result<serde_json::Value, SdkError> {
+        let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
+        let payload = ChannelUnmutePayload {
+            channel_id,
+            target_user: target_user.to_string(),
+        };
+        let envelope = self.build_envelope(signer, MessageType::CHANNEL_UNMUTE, &payload).await?;
+        let path = format!("/api/v1/channels/{}/mute/{}", channel_id, target_user);
+        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
+        let url = format!("{}{}", self.config.node_url, path);
+        self.send(|| {
+            self.http
+                .delete(&url)
+                .header("x-ogmara-auth", &auth)
+                .header("x-ogmara-address", &address)
+                .header("x-ogmara-timestamp", &timestamp)
+                .header("x-ogmara-nonce", &nonce)
+                .header("content-type", "application/octet-stream")
+                .body(envelope.clone())
+        })
+        .await
+    }
+
     /// GET /api/v1/bookmarks — list bookmarked posts.
     pub async fn list_bookmarks(
         &self,

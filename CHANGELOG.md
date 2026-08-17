@@ -5,6 +5,22 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-17
+
+### Added
+
+- **`ChannelMutePayload`/`ChannelUnmutePayload` + `mute_user()`/
+  `unmute_user()`** (l2-node final pre-mainnet audit W30). First
+  moderation-action client support of any kind in sdk-rust — `ban_user`/
+  `kick_user`/`unban_user` remain unimplemented here (a separate,
+  pre-existing gap, not addressed by this fix). `unmute_user` reverses
+  `mute_user` — the node's `remove_channel_mute` existed but had zero
+  callers before l2-node 0.93.0, so a permanent mute (`duration_secs: 0`)
+  was previously irrevocable from any client. `POST`/`DELETE
+  /api/v1/channels/:channel_id/mute/:address`, mirroring the `follow`/
+  `unfollow` inline-DELETE pattern (no shared `delete_authenticated`
+  helper exists yet in this SDK).
+
 ## [0.12.0] - 2026-08-17
 
 ### Security

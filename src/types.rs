@@ -501,6 +501,7 @@ impl MessageType {
     pub const REPORT: u8 = 0x40;
     pub const COUNTER_VOTE: u8 = 0x41;
     pub const CHANNEL_MUTE: u8 = 0x42;
+    pub const CHANNEL_UNMUTE: u8 = 0x43;
     // Account Management
     pub const DELETION_REQUEST: u8 = 0x50;
 }
@@ -528,6 +529,26 @@ pub struct ReactionPayload {
     pub channel_id: Option<u64>,
     pub emoji: String,
     pub remove: bool,
+}
+
+/// Channel mute payload for sending. First mute/unmute support in sdk-rust
+/// (audit W30) — ban/kick/unban are a separate, larger pre-existing gap not
+/// addressed here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelMutePayload {
+    pub channel_id: u64,
+    pub target_user: String,
+    /// 0 = permanent.
+    pub duration_secs: u64,
+    pub reason: Option<String>,
+}
+
+/// Reverses a `ChannelMutePayload` (l2-node 0.93.0+, audit W30). Minimal
+/// shape — just enough to key the delete, no reason/duration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelUnmutePayload {
+    pub channel_id: u64,
+    pub target_user: String,
 }
 
 /// News repost payload for sending.
