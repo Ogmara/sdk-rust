@@ -167,11 +167,16 @@ pub async fn connect(
     // nonce so a captured frame is neither fleet-portable nor replayable.
     let (auth, address, timestamp, nonce) =
         signer.sign_request(&binding.network, &binding.node_id, "GET", "/api/v1/ws");
+    // W5 dm-sync backfill authorization — proves the wallet itself (not
+    // just this connection) authorized this node to backfill its DMs.
+    let (dm_sync_ts, dm_sync_sig) = signer.dm_sync_claim(&binding.network, &binding.node_id);
     let auth_msg = serde_json::json!({
         "address": address,
         "timestamp": timestamp.parse::<u64>().unwrap_or(0),
         "signature": auth,
         "nonce": nonce,
+        "dm_sync_timestamp": dm_sync_ts.parse::<u64>().unwrap_or(0),
+        "dm_sync_signature": dm_sync_sig,
     });
     write
         .send(Message::Text(serde_json::to_string(&auth_msg).unwrap().into()))

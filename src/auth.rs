@@ -37,10 +37,39 @@ pub fn random_nonce_hex() -> String {
     hex::encode(buf)
 }
 
+/// Build a dm-sync wallet-authorization claim string (audit W5): proves the
+/// wallet at `wallet` authorized `node_id` SPECIFICALLY to backfill its DM
+/// history on its behalf. Mirrors `dm_sync::build_wallet_auth_claim`
+/// (l2-node) and `buildDmSyncAuthClaim` (sdk-js) — the three must never
+/// drift apart.
+pub fn build_dm_sync_auth_claim(node_id: &str, wallet: &str, network: &str, timestamp_ms: u64) -> String {
+    format!("ogmara-dm-sync-auth:{}:{}:{}:{}", network, node_id, wallet, timestamp_ms)
+}
+
+/// Whether a cached dm-sync claim signed at `cached_ts` is still worth
+/// reusing at `now` (audit W5 code review follow-up). MUST stay
+/// comfortably under the server's `WALLET_AUTH_MAX_AGE_SECS` (300s,
+/// l2-node `dm_sync.rs`) — caching indefinitely (the original v1 behavior)
+/// meant a long-lived signer silently and permanently lost dm-sync
+/// backfill the moment its one cached claim aged past the server's window,
+/// with no error surfaced anywhere. 4 minutes leaves a minute of margin
+/// for clock skew/latency.
+fn dm_sync_claim_is_fresh(cached_ts: u64, now: u64) -> bool {
+    const DM_SYNC_CLAIM_TTL_MS: u64 = 4 * 60 * 1000;
+    now.saturating_sub(cached_ts) <= DM_SYNC_CLAIM_TTL_MS
+}
+
 /// A signer that can produce auth headers for authenticated API calls.
 pub struct WalletSigner {
     signing_key: SigningKey,
     address: String,
+    /// Cached dm-sync backfill authorization claims (audit W5), keyed
+    /// "{network}:{node_id}" so a signer reused against a different target
+    /// node re-signs per-node rather than replaying a claim bound to a
+    /// stale one. sdk-rust has no device-delegation concept, so this signer
+    /// is always wallet-direct — unlike sdk-js's `WalletSigner`, no gating
+    /// is needed here.
+    dm_sync_claims: std::sync::Mutex<std::collections::HashMap<String, (u64, String)>>,
 }
 
 impl WalletSigner {
@@ -51,6 +80,7 @@ impl WalletSigner {
         Ok(Self {
             signing_key,
             address,
+            dm_sync_claims: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -110,6 +140,29 @@ impl WalletSigner {
             .encode(signature.to_bytes());
 
         (auth_b64, self.address.clone(), timestamp.to_string(), nonce)
+    }
+
+    /// Build (and cache) this wallet's dm-sync backfill authorization claim
+    /// for `node_id` on `network` (audit W5). Cached per `(network,
+    /// node_id)` pair and reused while fresh; re-signed once the cache
+    /// entry exceeds `DM_SYNC_CLAIM_TTL_MS` (see `dm_sync_claim_is_fresh`)
+    /// so it never silently outlives the server's 5-minute freshness
+    /// window. Returns `(timestamp_ms_str, signature_b64)`.
+    pub fn dm_sync_claim(&self, network: &str, node_id: &str) -> (String, String) {
+        let key = format!("{}:{}", network, node_id);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let mut cache = self.dm_sync_claims.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((ts, sig)) = cache.get(&key) {
+            if dm_sync_claim_is_fresh(*ts, now) {
+                return (ts.to_string(), sig.clone());
+            }
+        }
+        let timestamp = now;
+        let claim_string = build_dm_sync_auth_claim(node_id, &self.address, network, timestamp);
+        let signature = sign_klever_message(&self.signing_key, claim_string.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+        cache.insert(key, (timestamp, sig_b64.clone()));
+        (timestamp.to_string(), sig_b64)
     }
 
     /// Sign an Ogmara protocol message (for envelope construction).
@@ -219,6 +272,50 @@ mod tests {
         let (_, _, _, n1) = signer.sign_request("testnet", "n", "GET", "/x");
         let (_, _, _, n2) = signer.sign_request("testnet", "n", "GET", "/x");
         assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn build_dm_sync_auth_claim_matches_domain_format() {
+        // Audit W5: must exactly match dm_sync::build_wallet_auth_claim
+        // (l2-node) and buildDmSyncAuthClaim (sdk-js).
+        let claim = build_dm_sync_auth_claim("node-abc", "klv1wallet", "testnet", 12345);
+        assert_eq!(claim, "ogmara-dm-sync-auth:testnet:node-abc:klv1wallet:12345");
+    }
+
+    #[test]
+    fn dm_sync_claim_produces_a_verifiable_signature() {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
+        let (ts, sig_b64) = signer.dm_sync_claim("testnet", "node-abc");
+
+        let claim_string = build_dm_sync_auth_claim("node-abc", signer.address(), "testnet", ts.parse().unwrap());
+        let sig_bytes = base64::engine::general_purpose::STANDARD.decode(&sig_b64).unwrap();
+        let sig = Signature::from_slice(&sig_bytes).unwrap();
+        let expected = sign_klever_message(&key, claim_string.as_bytes());
+        assert_eq!(sig, expected);
+    }
+
+    #[test]
+    fn dm_sync_claim_is_cached_per_network_and_node() {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signer = WalletSigner::from_private_key(&key.to_bytes()).unwrap();
+
+        let a = signer.dm_sync_claim("testnet", "node-abc");
+        let b = signer.dm_sync_claim("testnet", "node-abc");
+        assert_eq!(a, b, "same (network, node_id) must reuse the cached claim");
+
+        let c = signer.dm_sync_claim("testnet", "node-xyz");
+        assert_ne!(a.1, c.1, "a different node_id must get its own claim");
+    }
+
+    #[test]
+    fn dm_sync_claim_is_fresh_within_ttl_stale_beyond_it() {
+        // Regression (audit W5 code review follow-up): caching a claim
+        // forever meant a long-lived signer silently lost dm-sync backfill
+        // once the cached claim aged past the server's freshness window.
+        assert!(dm_sync_claim_is_fresh(1_000, 1_000));
+        assert!(dm_sync_claim_is_fresh(1_000, 1_000 + 3 * 60 * 1000)); // 3 min later
+        assert!(!dm_sync_claim_is_fresh(1_000, 1_000 + 5 * 60 * 1000)); // 5 min later
     }
 
     #[test]

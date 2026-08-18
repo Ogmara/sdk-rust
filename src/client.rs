@@ -64,6 +64,33 @@ impl Default for ClientConfig {
 /// # Ok(())
 /// # }
 /// ```
+/// The full set of headers for one authenticated request attempt: the
+/// primary host-bound auth signature plus (audit W5) the wallet's optional
+/// dm-sync backfill authorization for the target node. Replaces a 4-tuple
+/// return from `sign_auth` — growing that tuple to 6 elements and repeating
+/// the optional-header logic at every call site would duplicate more than
+/// this struct + `.apply()` does.
+struct AuthAttempt {
+    auth: String,
+    address: String,
+    timestamp: String,
+    nonce: String,
+    dm_sync_timestamp: String,
+    dm_sync_signature: String,
+}
+
+impl AuthAttempt {
+    fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        builder
+            .header("x-ogmara-auth", &self.auth)
+            .header("x-ogmara-address", &self.address)
+            .header("x-ogmara-timestamp", &self.timestamp)
+            .header("x-ogmara-nonce", &self.nonce)
+            .header("x-ogmara-dmsync-auth-timestamp", &self.dm_sync_timestamp)
+            .header("x-ogmara-dmsync-auth", &self.dm_sync_signature)
+    }
+}
+
 pub struct OgmaraClient {
     config: ClientConfig,
     http: reqwest::Client,
@@ -521,17 +548,11 @@ impl OgmaraClient {
         }).await?;
         // Send as DELETE with body
         let path = format!("/api/v1/users/{}/follow", target);
-        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
+        let attempt = self.sign_auth(signer, "DELETE", &path).await?;
         let url = format!("{}{}", self.config.node_url, path);
         self.send(|| {
-            self.http
-                .delete(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-                .header("content-type", "application/octet-stream")
-                .body(envelope.clone())
+            let req = self.http.delete(&url).header("content-type", "application/octet-stream");
+            attempt.apply(req).body(envelope.clone())
         })
         .await
     }
@@ -620,17 +641,11 @@ impl OgmaraClient {
         };
         let envelope = self.build_envelope(signer, MessageType::CHANNEL_UNMUTE, &payload).await?;
         let path = format!("/api/v1/channels/{}/mute/{}", channel_id, target_user);
-        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
+        let attempt = self.sign_auth(signer, "DELETE", &path).await?;
         let url = format!("{}{}", self.config.node_url, path);
         self.send(|| {
-            self.http
-                .delete(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-                .header("content-type", "application/octet-stream")
-                .body(envelope.clone())
+            let req = self.http.delete(&url).header("content-type", "application/octet-stream");
+            attempt.apply(req).body(envelope.clone())
         })
         .await
     }
@@ -642,21 +657,13 @@ impl OgmaraClient {
         limit: u32,
     ) -> Result<BookmarksResponse, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp, nonce) =
-            self.sign_auth(signer, "GET", "/api/v1/bookmarks").await?;
+        let attempt = self.sign_auth(signer, "GET", "/api/v1/bookmarks").await?;
         let url = format!(
             "{}/api/v1/bookmarks?page={}&limit={}",
             self.config.node_url, page, limit
         );
-        self.send(|| {
-            self.http
-                .get(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-        })
-        .await
+        self.send(|| attempt.apply(self.http.get(&url)))
+            .await
     }
 
     /// POST /api/v1/bookmarks/:msg_id — save a post.
@@ -672,17 +679,10 @@ impl OgmaraClient {
     pub async fn remove_bookmark(&self, msg_id: &str) -> Result<serde_json::Value, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
         let path = format!("/api/v1/bookmarks/{}", msg_id);
-        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "DELETE", &path).await?;
+        let attempt = self.sign_auth(signer, "DELETE", &path).await?;
         let url = format!("{}{}", self.config.node_url, path);
-        self.send(|| {
-            self.http
-                .delete(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-        })
-        .await
+        self.send(|| attempt.apply(self.http.delete(&url)))
+            .await
     }
 
     /// GET /api/v1/feed — personal news feed (posts from followed users).
@@ -692,21 +692,13 @@ impl OgmaraClient {
         limit: u32,
     ) -> Result<FeedResponse, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp, nonce) =
-            self.sign_auth(signer, "GET", "/api/v1/feed").await?;
+        let attempt = self.sign_auth(signer, "GET", "/api/v1/feed").await?;
         let url = format!(
             "{}/api/v1/feed?page={}&limit={}",
             self.config.node_url, page, limit
         );
-        self.send(|| {
-            self.http
-                .get(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-        })
-        .await
+        self.send(|| attempt.apply(self.http.get(&url)))
+            .await
     }
 
     /// Discover nodes from the current home node and store for failover.
@@ -771,15 +763,25 @@ impl OgmaraClient {
     }
 
     /// Sign auth headers for `method path`, binding to the cached node
-    /// identity. Returns `(auth_b64, address, timestamp, nonce)`.
+    /// identity, plus (audit W5) the wallet's dm-sync backfill
+    /// authorization for that same node.
     async fn sign_auth(
         &self,
         signer: &WalletSigner,
         method: &str,
         path: &str,
-    ) -> Result<(String, String, String, String), SdkError> {
+    ) -> Result<AuthAttempt, SdkError> {
         let b = self.node_binding().await?;
-        Ok(signer.sign_request(&b.network, &b.node_id, method, path))
+        let (auth, address, timestamp, nonce) = signer.sign_request(&b.network, &b.node_id, method, path);
+        let (dm_sync_timestamp, dm_sync_signature) = signer.dm_sync_claim(&b.network, &b.node_id);
+        Ok(AuthAttempt {
+            auth,
+            address,
+            timestamp,
+            nonce,
+            dm_sync_timestamp,
+            dm_sync_signature,
+        })
     }
 
     /// Make an authenticated POST request with a serialized envelope.
@@ -798,20 +800,14 @@ impl OgmaraClient {
         body: Vec<u8>,
     ) -> Result<serde_json::Value, SdkError> {
         let signer = self.signer.as_ref().ok_or(SdkError::AuthRequired)?;
-        let (auth, address, timestamp, nonce) = self.sign_auth(signer, "POST", path).await?;
+        let attempt = self.sign_auth(signer, "POST", path).await?;
 
         let url = format!("{}{}", self.config.node_url, path);
         // PoW-aware send (audit 2026-06-07 W4): the closure rebuilds the request
         // (incl. body clone) so it can be re-issued after solving a challenge.
         self.send(|| {
-            self.http
-                .post(&url)
-                .header("x-ogmara-auth", &auth)
-                .header("x-ogmara-address", &address)
-                .header("x-ogmara-timestamp", &timestamp)
-                .header("x-ogmara-nonce", &nonce)
-                .header("content-type", "application/octet-stream")
-                .body(body.clone())
+            let req = self.http.post(&url).header("content-type", "application/octet-stream");
+            attempt.apply(req).body(body.clone())
         })
         .await
     }
