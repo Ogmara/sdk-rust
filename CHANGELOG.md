@@ -5,6 +5,23 @@ All notable changes to the Ogmara Rust SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-25
+
+Pre-mainnet dependency-security pass. `cargo audit` now reports
+**0 vulnerabilities and 0 warnings** for this component (was 1 vulnerability,
+2 warnings). Lockfile-only — no source, API, or behaviour changes.
+
+### Security
+
+- **Bumped `h2` 0.4.13 → 0.4.19** (RUSTSEC-2026-0258, unbounded empty DATA
+  frames). Reached through `reqwest`. Affects code paths that ship in the SDK,
+  though as a library our `Cargo.lock` binds only our own builds and tests —
+  downstream consumers resolve `h2` themselves and should re-audit their own
+  lockfiles.
+- **Bumped `rand` 0.8.5 → 0.8.8 and 0.9.2 → 0.9.5** (RUSTSEC-2026-0097,
+  unsoundness with a custom logger using `rand::rng()`). Informational
+  advisory, cleared for completeness.
+
 ## [0.14.0] - 2026-08-18
 
 ### Added
